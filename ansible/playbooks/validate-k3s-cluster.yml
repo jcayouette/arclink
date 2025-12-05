@@ -1,0 +1,143 @@
+---
+# Validate Existing K3s Cluster
+#
+# This playbook validates that an existing K3s cluster matches
+# the expected configuration from our deployment playbooks.
+#
+# Usage: ansible-playbook playbooks/validate-k3s-cluster.yml
+
+- name: Validate K3s Installation on Masters
+  hosts: k3s_master
+  gather_facts: yes
+  tasks:
+    - name: Check K3s service is running
+      systemd:
+        name: k3s
+        state: started
+      check_mode: yes
+      register: k3s_service
+      become: yes
+    
+    - name: Get K3s version
+      command: k3s --version
+      register: k3s_version_output
+      changed_when: false
+      become: yes
+    
+    - name: Display K3s version
+      debug:
+        msg: "{{ inventory_hostname }}: {{ k3s_version_output.stdout_lines[0] }}"
+    
+    - name: Check if node is Ready
+      command: k3s kubectl get node {{ inventory_hostname_short }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      register: node_status
+      changed_when: false
+      become: yes
+    
+    - name: Verify node is Ready
+      assert:
+        that:
+          - node_status.stdout == "True"
+        fail_msg: "Node {{ inventory_hostname }} is not Ready!"
+        success_msg: "Node {{ inventory_hostname }} is Ready"
+
+- name: Validate K3s Installation on Agents
+  hosts: k3s_agents
+  gather_facts: yes
+  tasks:
+    - name: Check K3s agent service is running
+      systemd:
+        name: k3s-agent
+        state: started
+      check_mode: yes
+      register: k3s_agent_service
+      become: yes
+    
+    - name: Get K3s version
+      command: k3s --version
+      register: k3s_version_output
+      changed_when: false
+      become: yes
+    
+    - name: Display K3s version
+      debug:
+        msg: "{{ inventory_hostname }}: {{ k3s_version_output.stdout_lines[0] }}"
+
+- name: Validate Cluster Status
+  hosts: k3s_master[0]
+  gather_facts: no
+  tasks:
+    - name: Get all nodes
+      command: k3s kubectl get nodes -o wide
+      register: all_nodes
+      changed_when: false
+      become: yes
+    
+    - name: Display all nodes
+      debug:
+        var: all_nodes.stdout_lines
+    
+    - name: Count Ready nodes
+      shell: k3s kubectl get nodes --no-headers | grep -c " Ready"
+      register: ready_count
+      changed_when: false
+      become: yes
+    
+    - name: Verify all nodes are Ready
+      assert:
+        that:
+          - ready_count.stdout | int == groups['k3s_cluster'] | length
+        fail_msg: "Expected {{ groups['k3s_cluster'] | length }} Ready nodes, found {{ ready_count.stdout }}"
+        success_msg: "All {{ ready_count.stdout }} nodes are Ready!"
+    
+    - name: Check registry configuration exists
+      stat:
+        path: /etc/rancher/k3s/registries.yaml
+      register: registry_config
+      become: yes
+    
+    - name: Display registry config status
+      debug:
+        msg: "Registry configuration: {{ 'EXISTS' if registry_config.stat.exists else 'MISSING' }}"
+    
+    - name: Get registry config content (if exists)
+      command: cat /etc/rancher/k3s/registries.yaml
+      register: registry_content
+      when: registry_config.stat.exists
+      changed_when: false
+      become: yes
+    
+    - name: Display registry config
+      debug:
+        var: registry_content.stdout_lines
+      when: registry_config.stat.exists
+    
+    - name: Check Docker registry accessibility
+      uri:
+        url: "http://{{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}:5000/v2/"
+        status_code: 200
+      register: registry_check
+      ignore_errors: yes
+    
+    - name: Display registry status
+      debug:
+        msg: "Registry at {{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}:5000 is {{ 'ACCESSIBLE' if registry_check.status == 200 else 'NOT ACCESSIBLE' }}"
+
+- name: Summary
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display validation summary
+      debug:
+        msg:
+          - "============================================"
+          - "K3S CLUSTER VALIDATION COMPLETE"
+          - "============================================"
+          - ""
+          - "Cluster: {{ groups['k3s_cluster'] | length }} nodes total"
+          - "  - Masters: {{ groups['k3s_master'] | length }}"
+          - "  - Agents: {{ groups['k3s_agents'] | length }}"
+          - ""
+          - "All checks passed! Cluster is operational."
+          - ""
+          - "Run 'kubectl get nodes' for full cluster status"

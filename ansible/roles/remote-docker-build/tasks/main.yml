@@ -1,0 +1,123 @@
+---
+- name: Determine local docker directory path
+  set_fact:
+    actual_docker_dir: "{{ playbook_dir }}/../../docker"
+  
+- name: Verify local docker directory exists
+  stat:
+    path: "{{ actual_docker_dir }}"
+  register: docker_dir_check
+
+- name: Fail if docker directory not found
+  fail:
+    msg: "Docker build directory not found at {{ actual_docker_dir }}"
+  when: not docker_dir_check.stat.exists
+
+- name: Ensure Docker is installed on registry host
+  command: docker --version
+  register: docker_check
+  failed_when: false
+  changed_when: false
+  delegate_to: "{{ registry_host }}.{{ domain }}"
+
+- name: Fail if Docker is not installed on registry host
+  fail:
+    msg: "Docker is not installed on {{ registry_host }}. Please run deploy-registry.yml first."
+  when: docker_check.rc != 0
+
+- name: Create remote build directory
+  file:
+    path: "{{ remote_build_dir }}"
+    state: directory
+    mode: '0755'
+  delegate_to: "{{ registry_host }}.{{ domain }}"
+
+- name: Copy docker build context to registry host
+  synchronize:
+    src: "{{ actual_docker_dir }}/"
+    dest: "{{ remote_build_dir }}/"
+    delete: yes
+    recursive: yes
+  delegate_to: "{{ registry_host }}.{{ domain }}"
+
+- name: Build OpenTAKServer image on registry host (native architecture)
+  shell: |
+    docker build \
+      --build-arg OTS_VERSION={{ ots_version }} \
+      -t {{ registry_address }}/opentakserver:{{ ots_version }} \
+      -t {{ registry_address }}/opentakserver:latest \
+      -f opentakserver/Dockerfile \
+      opentakserver/ 2>&1
+  args:
+    chdir: "{{ remote_build_dir }}"
+  register: ots_build
+  changed_when: true
+  become: yes
+  delegate_to: "{{ registry_host }}.{{ domain }}"
+
+- name: Display OpenTAKServer build output
+  debug:
+    msg: "{{ ots_build.stdout_lines }}"
+  when: ots_build.stdout_lines is defined
+
+- name: Build OpenTAKServer UI image on registry host (native architecture)
+  shell: |
+    docker build \
+      --build-arg UI_VERSION={{ ui_version }} \
+      -t {{ registry_address }}/opentakserver-ui:{{ ui_version }} \
+      -t {{ registry_address }}/opentakserver-ui:latest \
+      -f ui/Dockerfile \
+      ui/ 2>&1
+  args:
+    chdir: "{{ remote_build_dir }}"
+  register: ui_build
+  changed_when: true
+  become: yes
+  delegate_to: "{{ registry_host }}.{{ domain }}"
+
+- name: Display UI build output
+  debug:
+    msg: "{{ ui_build.stdout_lines }}"
+  when: ui_build.stdout_lines is defined
+
+- name: Push OpenTAKServer versioned image to registry
+  command: docker push {{ registry_address }}/opentakserver:{{ ots_version }}
+  register: ots_push_version
+  become: yes
+  delegate_to: "{{ registry_host }}.{{ domain }}"
+
+- name: Push OpenTAKServer latest tag to registry
+  command: docker push {{ registry_address }}/opentakserver:latest
+  register: ots_push_latest
+  become: yes
+  delegate_to: "{{ registry_host }}.{{ domain }}"
+
+- name: Push UI versioned image to registry
+  command: docker push {{ registry_address }}/opentakserver-ui:{{ ui_version }}
+  register: ui_push_version
+  become: yes
+  delegate_to: "{{ registry_host }}.{{ domain }}"
+
+- name: Push UI latest tag to registry
+  command: docker push {{ registry_address }}/opentakserver-ui:latest
+  register: ui_push_latest
+  become: yes
+  delegate_to: "{{ registry_host }}.{{ domain }}"
+
+- name: Verify images in registry
+  uri:
+    url: "http://{{ registry_address }}/v2/_catalog"
+    method: GET
+    return_content: yes
+  register: registry_catalog
+  delegate_to: "{{ registry_host }}.{{ domain }}"
+
+- name: Display registry contents
+  debug:
+    msg: "Registry contains: {{ registry_catalog.json.repositories }}"
+
+- name: Clean up remote build directory
+  file:
+    path: "{{ remote_build_dir }}"
+    state: absent
+  delegate_to: "{{ registry_host }}.{{ domain }}"

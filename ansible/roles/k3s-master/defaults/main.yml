@@ -1,0 +1,16 @@
+---
+# K3s master role defaults
+
+# K3s installation
+k3s_install_script: https://get.k3s.io
+k3s_install_check: /usr/local/bin/k3s
+
+# Determine if this is HA setup (3+ masters)
+k3s_ha_mode: "{{ groups['k3s_master'] | length >= 3 }}"
+
+# Registry configuration directory
+k3s_config_dir: /etc/rancher/k3s
+
+# Kubeconfig location
+k3s_kubeconfig_path: /etc/rancher/k3s/k3s.yaml
+k3s_kubeconfig_mode: '0644'

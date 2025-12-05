@@ -1,0 +1,142 @@
+---
+# Docker registry installation and configuration
+
+- name: Remove conflicting docker-compose-plugin
+  apt:
+    name: docker-compose-plugin
+    state: absent
+    purge: yes
+  become: yes
+  ignore_errors: yes
+
+- name: Install Docker packages
+  apt:
+    name: "{{ docker_packages }}"
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Install Docker CLI
+  apt:
+    name: docker-cli
+    state: present
+  become: yes
+
+- name: Install Python pip
+  apt:
+    name:
+      - python3-pip
+    state: present
+  become: yes
+
+- name: Remove old python3-docker package (if present)
+  apt:
+    name: python3-docker
+    state: absent
+  become: yes
+  ignore_errors: yes
+
+- name: Uninstall any existing docker python packages
+  pip:
+    name:
+      - docker
+      - docker-py
+    state: absent
+    executable: pip3
+    extra_args: --break-system-packages
+  become: yes
+  ignore_errors: yes
+
+- name: Install latest docker library via pip
+  pip:
+    name:
+      - docker>=7.0.0
+    state: present
+    executable: pip3
+    extra_args: --break-system-packages
+  become: yes
+
+- name: Ensure Docker service is running
+  systemd:
+    name: docker
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  become: yes
+
+- name: Wait for Docker to be ready
+  wait_for:
+    path: /var/run/docker.sock
+    state: present
+    timeout: 30
+  become: yes
+
+- name: Add ansible user to docker group
+  user:
+    name: "{{ ansible_user }}"
+    groups: docker
+    append: yes
+  become: yes
+
+- name: Reset SSH connection to apply docker group
+  meta: reset_connection
+
+- name: Create registry volume directory
+  file:
+    path: "{{ registry_volume_path }}"
+    state: directory
+    mode: '0755'
+  become: yes
+
+- name: Pull Docker registry image
+  command: docker pull {{ registry_image }}
+  register: pull_result
+  changed_when: "'Downloaded newer image' in pull_result.stdout or 'Pulling from' in pull_result.stdout"
+
+- name: Stop existing registry container (if any)
+  command: docker stop {{ registry_container_name }}
+  ignore_errors: yes
+
+- name: Remove existing registry container (if any)
+  command: docker rm {{ registry_container_name }}
+  ignore_errors: yes
+
+- name: Start Docker registry container
+  command: >
+    docker run -d
+    --name {{ registry_container_name }}
+    --restart {{ registry_restart_policy }}
+    -p {{ registry_port }}:5000
+    -v {{ registry_volume_path }}:/var/lib/registry
+    {{ registry_image }}
+  register: registry_container
+
+- name: Configure Docker daemon for insecure registry
+  copy:
+    content: |
+      {
+        "insecure-registries": ["{{ ansible_host }}:{{ registry_port }}"]
+      }
+    dest: /etc/docker/daemon.json
+  become: yes
+  register: docker_daemon_config
+
+- name: Restart Docker service to apply config
+  systemd:
+    name: docker
+    state: restarted
+  become: yes
+  when: docker_daemon_config.changed
+
+- name: Wait for registry to be ready
+  uri:
+    url: "http://localhost:{{ registry_port }}/v2/"
+    status_code: 200
+  register: registry_check
+  until: registry_check.status == 200
+  retries: 10
+  delay: 2
+
+- name: Display registry status
+  debug:
+    msg: "Docker registry running at {{ inventory_hostname }}:{{ registry_port }}"

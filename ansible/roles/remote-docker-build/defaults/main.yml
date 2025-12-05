@@ -1,0 +1,17 @@
+---
+# Docker registry configuration
+registry_address: "{{ registry_host }}.{{ domain }}:{{ registry_port }}"
+registry_host: "node0"
+registry_port: 5000
+
+# OpenTAKServer versions
+ots_version: "1.6.3"
+ui_version: "master"
+
+# Remote paths on registry host
+remote_build_dir: "/tmp/docker-build"
+# Construct path relative to ansible directory
+local_docker_dir: "{{ playbook_dir | dirname }}/docker"
+
+# Deployment configuration
+namespace: "tak"

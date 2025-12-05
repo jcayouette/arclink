@@ -1,0 +1,27 @@
+---
+# Main tasks file for common role
+
+- name: Include package management tasks
+  include_tasks: packages.yml
+  tags:
+    - packages
+    - common
+
+- name: Include system configuration tasks
+  include_tasks: system.yml
+  tags:
+    - system
+    - common
+
+- name: Include kernel configuration tasks
+  include_tasks: kernel.yml
+  tags:
+    - kernel
+    - common
+
+- name: Include font and MOTD configuration tasks
+  include_tasks: fonts.yml
+  tags:
+    - fonts
+    - motd
+    - common

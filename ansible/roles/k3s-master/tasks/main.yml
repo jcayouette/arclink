@@ -1,0 +1,125 @@
+---
+# K3s master installation
+
+- name: Create K3s config directory
+  file:
+    path: "{{ k3s_config_dir }}"
+    state: directory
+    mode: '0755'
+  become: yes
+
+- name: Deploy registries.yaml to master
+  template:
+    src: "{{ playbook_dir }}/../roles/docker-registry/templates/registries.yaml.j2"
+    dest: "{{ k3s_config_dir }}/registries.yaml"
+    mode: '0644'
+  become: yes
+
+- name: Check if K3s is already installed
+  stat:
+    path: "{{ k3s_install_check }}"
+  register: k3s_installed
+
+- name: Install K3s on primary master (first master with cluster-init)
+  shell: |
+    curl -sfL {{ k3s_install_script }} | sh -s - server \
+      --write-kubeconfig-mode={{ k3s_kubeconfig_mode }} \
+      {{ '--cluster-init' if k3s_ha_mode else '' }} \
+      --disable=traefik \
+      --disable=servicelb \
+      --cluster-cidr={{ cluster_cidr }} \
+      --service-cidr={{ service_cidr }} \
+      --node-taint CriticalAddonsOnly=true:NoExecute
+  when:
+    - not k3s_installed.stat.exists
+    - k3s_master_primary | default(false)
+  become: yes
+
+- name: Wait for primary master to be ready
+  wait_for:
+    path: "{{ k3s_token_file }}"
+    state: present
+  when: k3s_master_primary | default(false)
+  become: yes
+
+- name: Get K3s token from primary master
+  slurp:
+    src: "{{ k3s_token_file }}"
+  register: k3s_token_content
+  when: k3s_master_primary | default(false)
+  become: yes
+
+- name: Save K3s token as fact
+  set_fact:
+    k3s_cluster_token: "{{ k3s_token_content.content | b64decode | trim }}"
+  when: k3s_master_primary | default(false)
+
+- name: Share K3s token with all hosts
+  set_fact:
+    k3s_cluster_token: "{{ hostvars[groups['k3s_master'][0]]['k3s_cluster_token'] }}"
+  when: not (k3s_master_primary | default(false))
+
+- name: Install K3s on additional masters (join existing cluster)
+  shell: |
+    curl -sfL {{ k3s_install_script }} | K3S_TOKEN={{ k3s_cluster_token }} sh -s - server \
+      --server https://{{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}:6443 \
+      --write-kubeconfig-mode={{ k3s_kubeconfig_mode }} \
+      --disable=traefik \
+      --disable=servicelb \
+      --cluster-cidr={{ cluster_cidr }} \
+      --service-cidr={{ service_cidr }} \
+      --node-taint CriticalAddonsOnly=true:NoExecute
+  when:
+    - not k3s_installed.stat.exists
+    - not (k3s_master_primary | default(false))
+    - k3s_ha_mode
+  become: yes
+
+- name: Ensure K3s service is running
+  systemd:
+    name: k3s
+    state: started
+    enabled: yes
+  become: yes
+
+- name: Wait for K3s to be ready
+  command: k3s kubectl get nodes
+  register: k3s_ready
+  until: k3s_ready.rc == 0
+  retries: 10
+  delay: 5
+  become: yes
+  changed_when: false
+
+- name: Display master node status
+  debug:
+    msg: "K3s master installed on {{ inventory_hostname }}"
+
+- name: Create .kube directory for admin user on primary master
+  file:
+    path: "/home/{{ ansible_user }}/.kube"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+  when: k3s_master_primary | default(false)
+  become: yes
+
+- name: Copy kubeconfig to admin user on primary master
+  copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: "/home/{{ ansible_user }}/.kube/config"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0600'
+    remote_src: yes
+  when: k3s_master_primary | default(false)
+  become: yes
+
+- name: Update kubeconfig server address for primary master
+  replace:
+    path: "/home/{{ ansible_user }}/.kube/config"
+    regexp: 'https://127\.0\.0\.1:6443'
+    replace: "https://{{ ansible_host }}:6443"
+  when: k3s_master_primary | default(false)
+  become: yes

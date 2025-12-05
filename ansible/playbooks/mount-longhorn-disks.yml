@@ -1,0 +1,130 @@
+---
+# Mount dedicated partitions to /mnt/longhorn for Longhorn storage
+# This mounts the large unused partitions on each node
+
+- name: Mount Longhorn Storage Partitions
+  hosts: k3s_cluster
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Get block device information
+      shell: lsblk -J
+      register: lsblk_output
+      changed_when: false
+    
+    - name: Display current block devices
+      debug:
+        msg: "{{ lsblk_output.stdout | from_json }}"
+    
+    - name: Identify the Longhorn partition
+      shell: |
+        # Find the largest unmounted partition on nvme0n1
+        lsblk -J /dev/nvme0n1 | jq -r '.blockdevices[0].children[] | select(.mountpoints[0] == null or .mountpoints[0] == "") | .name' | head -1
+      register: partition_name
+      changed_when: false
+    
+    - name: Set Longhorn partition path
+      set_fact:
+        longhorn_partition: "/dev/{{ partition_name.stdout }}"
+    
+    - name: Display identified partition
+      debug:
+        msg: "Using {{ longhorn_partition }} for Longhorn storage on {{ inventory_hostname }}"
+    
+    - name: Check if partition already has a filesystem
+      shell: blkid {{ longhorn_partition }} || echo "no_fs"
+      register: fs_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Create ext4 filesystem on Longhorn partition if needed
+      filesystem:
+        fstype: ext4
+        dev: "{{ longhorn_partition }}"
+        opts: -L longhorn
+      when: "'no_fs' in fs_check.stdout"
+    
+    - name: Ensure /mnt/longhorn directory exists
+      file:
+        path: /mnt/longhorn
+        state: directory
+        mode: '0755'
+    
+    - name: Check if partition is already mounted
+      shell: mountpoint -q /mnt/longhorn
+      register: mount_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Unmount /mnt/longhorn if it's mounted to wrong device
+      mount:
+        path: /mnt/longhorn
+        state: unmounted
+      when: mount_check.rc == 0
+    
+    - name: Mount Longhorn partition to /mnt/longhorn
+      mount:
+        path: /mnt/longhorn
+        src: "{{ longhorn_partition }}"
+        fstype: ext4
+        opts: defaults
+        state: mounted
+    
+    - name: Add mount to /etc/fstab for persistence
+      mount:
+        path: /mnt/longhorn
+        src: "{{ longhorn_partition }}"
+        fstype: ext4
+        opts: defaults
+        state: present
+    
+    - name: Set proper permissions on /mnt/longhorn
+      file:
+        path: /mnt/longhorn
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+    
+    - name: Verify mount
+      shell: df -h /mnt/longhorn
+      register: df_output
+      changed_when: false
+    
+    - name: Display mount information
+      debug:
+        msg: "{{ df_output.stdout_lines }}"
+
+- name: Update Longhorn Node Configurations
+  hosts: localhost
+  gather_facts: no
+  environment:
+    KUBECONFIG: "{{ playbook_dir }}/../kubeconfig"
+  
+  tasks:
+    - name: Wait for nodes to update disk space
+      pause:
+        seconds: 10
+        prompt: "Waiting for Longhorn to detect new disk space"
+    
+    - name: Trigger Longhorn to rescan disk space
+      shell: |
+        echo "Restarting Longhorn manager pods to rescan disk space..."
+        kubectl rollout restart daemonset/longhorn-manager -n longhorn-system
+        kubectl rollout status daemonset/longhorn-manager -n longhorn-system --timeout=300s
+      register: restart_output
+    
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "LONGHORN DISK MOUNTING COMPLETE"
+          - "============================================"
+          - ""
+          - "Mounted partitions:"
+          - "  node0: /dev/nvme0n1p2 (~416 GB)"
+          - "  node1-6: /dev/nvme0n1p3 (~188 GB each)"
+          - ""
+          - "Check Longhorn UI to see updated disk space"
+          - "It may take a minute for the changes to reflect"

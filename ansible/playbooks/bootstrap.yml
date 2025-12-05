@@ -1,0 +1,78 @@
+---
+# Bootstrap Playbook - Initial SSH Key Setup
+#
+# This playbook runs on your control node (localhost) and sets up
+# SSH access to all cluster nodes. Run this FIRST before any other playbooks.
+#
+# Requirements:
+# - Password access to all nodes (via ssh password or already having keys)
+# - sshpass installed if using password authentication
+#
+# Usage:
+#   ansible-playbook playbooks/bootstrap.yml
+#   
+# Or with password prompt:
+#   ansible-playbook playbooks/bootstrap.yml --ask-pass
+
+- name: Bootstrap SSH Access to Cluster Nodes
+  hosts: localhost
+  gather_facts: yes
+  
+  tasks:
+    - name: Check if SSH key exists
+      stat:
+        path: "{{ ansible_env.HOME }}/.ssh/id_ed25519"
+      register: ssh_key
+    
+    - name: Generate SSH key if it doesn't exist
+      command: ssh-keygen -t ed25519 -f {{ ansible_env.HOME }}/.ssh/id_ed25519 -N ""
+      when: not ssh_key.stat.exists
+    
+    - name: Display SSH key location
+      debug:
+        msg: "SSH key located at: {{ ansible_env.HOME }}/.ssh/id_ed25519"
+
+- name: Distribute SSH Keys to All Nodes
+  hosts: all
+  gather_facts: no
+  vars:
+    ssh_key_path: "{{ hostvars['localhost']['ansible_env']['HOME'] }}/.ssh/id_ed25519.pub"
+  
+  tasks:
+    - name: Copy SSH key to node
+      authorized_key:
+        user: "{{ ansible_user }}"
+        key: "{{ lookup('file', ssh_key_path) }}"
+        state: present
+
+- name: Verify Bootstrap Complete
+  hosts: all
+  gather_facts: no
+  tasks:
+    - name: Test passwordless SSH
+      ping:
+    
+    - name: Display success message
+      debug:
+        msg: "✓ Passwordless SSH configured for {{ inventory_hostname }}"
+
+- name: Bootstrap Summary
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "BOOTSTRAP COMPLETE"
+          - "============================================"
+          - ""
+          - "✓ SSH keys generated/verified"
+          - "✓ Keys distributed to {{ groups['all'] | length }} nodes"
+          - "✓ Passwordless SSH configured"
+          - ""
+          - "Next steps:"
+          - "  1. Run prerequisite validation:"
+          - "     ansible-playbook playbooks/validate-prerequisites.yml"
+          - "  2. Setup common configuration:"
+          - "     ansible-playbook playbooks/setup-common.yml"

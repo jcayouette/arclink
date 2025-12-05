@@ -1,0 +1,185 @@
+---
+# Deploy Rancher cluster management UI
+# Provides web-based Kubernetes management interface
+
+- name: Deploy Rancher Management UI
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    rancher_namespace: cattle-system
+    rancher_hostname: rancher.research.core
+    cert_manager_version: v1.16.2
+    rancher_version: latest
+    helm_install_script: /tmp/get_helm.sh
+  
+  tasks:
+    - name: Check if kubectl is available
+      command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Fail if kubectl not found
+      fail:
+        msg: "kubectl not found. Please install kubectl and configure KUBECONFIG"
+      when: kubectl_check.rc != 0
+    
+    - name: Check if Helm is installed
+      command: helm version
+      register: helm_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Download Helm installation script
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: "{{ helm_install_script }}"
+        mode: '0700'
+      when: helm_check.rc != 0
+    
+    - name: Install Helm
+      command: "{{ helm_install_script }}"
+      when: helm_check.rc != 0
+      become: yes
+    
+    - name: Remove Helm installation script
+      file:
+        path: "{{ helm_install_script }}"
+        state: absent
+      when: helm_check.rc != 0
+    
+    - name: Check cluster connectivity
+      command: kubectl get nodes
+      register: cluster_check
+      changed_when: false
+      failed_when: cluster_check.rc != 0
+    
+    - name: Install cert-manager namespace
+      command: kubectl create namespace cert-manager
+      register: cm_ns
+      failed_when: cm_ns.rc != 0 and 'AlreadyExists' not in cm_ns.stderr
+      changed_when: cm_ns.rc == 0
+    
+    - name: Install cert-manager CRDs
+      command: >
+        kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.crds.yaml
+      register: cm_crds
+      changed_when: "'created' in cm_crds.stdout or 'configured' in cm_crds.stdout"
+    
+    - name: Install cert-manager
+      command: >
+        kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.yaml
+      register: cm_install
+      changed_when: "'created' in cm_install.stdout or 'configured' in cm_install.stdout"
+    
+    - name: Wait for cert-manager to be ready
+      command: >
+        kubectl wait --for=condition=ready pod
+        -l app.kubernetes.io/instance=cert-manager
+        -n cert-manager
+        --timeout=300s
+      register: cm_wait
+      changed_when: false
+      retries: 3
+      delay: 10
+      until: cm_wait.rc == 0
+    
+    - name: Add Rancher Helm repository
+      command: helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
+      register: helm_repo
+      changed_when: "'has been added' in helm_repo.stdout"
+      failed_when: helm_repo.rc != 0 and 'already exists' not in helm_repo.stderr
+    
+    - name: Update Helm repositories
+      command: helm repo update
+      changed_when: false
+    
+    - name: Create Rancher namespace
+      command: kubectl create namespace {{ rancher_namespace }}
+      register: rancher_ns
+      failed_when: rancher_ns.rc != 0 and 'AlreadyExists' not in rancher_ns.stderr
+      changed_when: rancher_ns.rc == 0
+    
+    - name: Install Rancher with self-signed certificates
+      command: >
+        helm upgrade --install rancher rancher-stable/rancher
+        --namespace {{ rancher_namespace }}
+        --set hostname={{ rancher_hostname }}
+        --set bootstrapPassword=admin
+        --set replicas=3
+      register: rancher_install
+      changed_when: true
+    
+    - name: Wait for Rancher to be ready
+      command: >
+        kubectl wait --for=condition=ready pod
+        -l app=rancher
+        -n {{ rancher_namespace }}
+        --timeout=600s
+      register: rancher_wait
+      changed_when: false
+      retries: 5
+      delay: 30
+      until: rancher_wait.rc == 0
+    
+    - name: Get Rancher service info
+      command: kubectl get svc -n {{ rancher_namespace }}
+      register: rancher_svc
+      changed_when: false
+    
+    - name: Get primary master IP
+      set_fact:
+        master_ip: "{{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}"
+      when: groups['k3s_master'] is defined
+    
+    - name: Expose Rancher via NodePort (since Traefik is disabled)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: rancher-nodeport
+            namespace: "{{ rancher_namespace }}"
+          spec:
+            type: NodePort
+            selector:
+              app: rancher
+            ports:
+            - name: https
+              protocol: TCP
+              port: 443
+              targetPort: 443
+              nodePort: 30443
+            - name: http
+              protocol: TCP
+              port: 80
+              targetPort: 80
+              nodePort: 30080
+    
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "RANCHER DEPLOYMENT COMPLETE"
+          - "============================================"
+          - ""
+          - "Rancher is now running on your cluster"
+          - "Namespace: {{ rancher_namespace }}"
+          - ""
+          - "Access Rancher UI:"
+          - "  https://{{ master_ip | default('10.0.0.160') }}:30443"
+          - ""
+          - "  Or configure DNS:"
+          - "    {{ rancher_hostname }} → {{ master_ip | default('10.0.0.160') }}"
+          - "    Then access: https://{{ rancher_hostname }}:30443"
+          - ""
+          - "  Initial password: admin"
+          - "  (You'll be prompted to change it on first login)"
+          - ""
+          - "Note: Using NodePort (30443) since Traefik ingress is disabled"
+          - "Note: Using self-signed certificates - accept browser warning"
+          - ""
+          - "Verify installation:"
+          - "  kubectl get pods -n {{ rancher_namespace }}"
+          - "  kubectl get svc rancher-nodeport -n {{ rancher_namespace }}"

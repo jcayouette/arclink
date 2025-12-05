@@ -1,0 +1,22 @@
+---
+# Handlers for common role
+
+- name: reload systemd-modules-load
+  systemd:
+    name: systemd-modules-load
+    state: restarted
+  become: yes
+
+- name: reload sysctl
+  command: sysctl --system
+  become: yes
+
+- name: restart sshd
+  systemd:
+    name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+    state: restarted
+  become: yes
+
+- name: Apply console setup
+  command: setupcon -f --force
+  become: yes

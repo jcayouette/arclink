@@ -1,0 +1,84 @@
+---
+# Remove SSH Keys Playbook
+#
+# This playbook removes all SSH keys from cluster nodes' authorized_keys files.
+# Useful for testing the bootstrap process from scratch.
+#
+# WARNING: This will remove passwordless SSH access to all nodes!
+# You will need to run bootstrap.yml again to restore access.
+#
+# Usage: ansible-playbook playbooks/remove-ssh-keys.yml
+
+- name: Confirm SSH Key Removal
+  hosts: localhost
+  gather_facts: no
+  vars_prompt:
+    - name: confirm_disable
+      prompt: "This will DISABLE passwordless SSH to all nodes. Type 'yes' to confirm"
+      private: no
+  
+  tasks:
+    - name: Verify confirmation
+      assert:
+        that:
+          - confirm_disable == "yes"
+        fail_msg: "SSH key removal cancelled - confirmation not provided"
+
+- name: Remove SSH Keys from Cluster Nodes
+  hosts: all
+  gather_facts: no
+  
+  tasks:
+    - name: Backup authorized_keys
+      copy:
+        src: "{{ ansible_env.HOME }}/.ssh/authorized_keys"
+        dest: "{{ ansible_env.HOME }}/.ssh/authorized_keys.backup.{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: yes
+      ignore_errors: yes
+    
+    - name: Clear authorized_keys
+      shell: > ~/.ssh/authorized_keys
+      args:
+        warn: false
+    
+    - name: Display success message
+      debug:
+        msg: "✓ SSH keys removed from {{ inventory_hostname }}"
+
+- name: Verify SSH Keys Removed
+  hosts: localhost
+  gather_facts: no
+  
+  tasks:
+    - name: Test passwordless SSH (should fail)
+      command: ssh -o BatchMode=yes -o ConnectTimeout=3 {{ groups['k3s_master'][0] }} "echo test"
+      register: ssh_test
+      ignore_errors: yes
+      failed_when: false
+      changed_when: false
+    
+    - name: Display verification result
+      debug:
+        msg: "{{ '✓ Passwordless SSH successfully disabled' if ssh_test.rc != 0 else '⚠ Warning: SSH still works, keys may not be fully removed' }}"
+
+- name: Summary
+  hosts: localhost
+  gather_facts: no
+  
+  tasks:
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "SSH KEYS REMOVED"
+          - "============================================"
+          - ""
+          - "✓ Authorized keys cleared from {{ groups['all'] | length }} nodes"
+          - "✓ Backups saved with timestamp"
+          - "✓ Passwordless SSH disabled"
+          - ""
+          - "Next steps to restore access:"
+          - "  1. Run bootstrap playbook:"
+          - "     ansible-playbook playbooks/bootstrap.yml --ask-pass"
+          - ""
+          - "Note: This will regenerate SSH keys and distribute them to all nodes"

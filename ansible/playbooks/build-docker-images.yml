@@ -1,0 +1,204 @@
+---
+- name: Build OpenTAKServer Docker Images with Socket.IO Patches
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  vars:
+    registry_address: "node0.research.core:5000"
+    registry_ip: "10.0.0.160:5000"
+    ots_version: "1.6.3"
+    ui_version: "master"
+    docker_dir: "{{ playbook_dir }}/../../docker"
+
+  tasks:
+    - name: Check if Docker is installed
+      command: docker --version
+      register: docker_check
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if Docker is not installed
+      fail:
+        msg: "Docker is not installed. Please install Docker first."
+      when: docker_check.rc != 0
+
+    - name: Ensure Docker daemon directory exists
+      file:
+        path: /etc/docker
+        state: directory
+        mode: '0755'
+      become: yes
+
+    - name: Configure Docker for insecure registry
+      copy:
+        content: |
+          {
+            "insecure-registries": ["{{ registry_address }}", "{{ registry_ip }}"]
+          }
+        dest: /etc/docker/daemon.json
+        mode: '0644'
+      become: yes
+      register: docker_config
+
+    - name: Restart Docker to apply registry configuration
+      systemd:
+        name: docker
+        state: restarted
+      become: yes
+      when: docker_config.changed
+
+    - name: Wait for Docker to be ready
+      command: docker info
+      register: docker_ready
+      until: docker_ready.rc == 0
+      retries: 5
+      delay: 2
+      changed_when: false
+      when: docker_config.changed
+
+    - name: Display build information
+      debug:
+        msg:
+          - "Building OpenTAKServer images with Socket.IO patches"
+          - "Registry: {{ registry_address }}"
+          - "OTS Version: {{ ots_version }}"
+          - "UI Version: {{ ui_version }}"
+          - "This will take approximately 30 minutes on first build..."
+
+    - name: Build OpenTAKServer image
+      command:
+        cmd: >
+          docker build
+          --platform linux/arm64
+          --build-arg OTS_VERSION={{ ots_version }}
+          -t {{ registry_address }}/opentakserver:{{ ots_version }}
+          -t {{ registry_address }}/opentakserver:latest
+          -f opentakserver/Dockerfile
+          opentakserver/
+        chdir: "{{ docker_dir }}"
+      register: ots_build
+      changed_when: true
+
+    - name: Display OpenTAKServer build result
+      debug:
+        msg: "OpenTAKServer image built successfully"
+
+    - name: Build OpenTAKServer UI image
+      command:
+        cmd: >
+          docker build
+          --platform linux/arm64
+          --build-arg UI_VERSION={{ ui_version }}
+          -t {{ registry_address }}/opentakserver-ui:{{ ui_version }}
+          -t {{ registry_address }}/opentakserver-ui:latest
+          -f ui/Dockerfile
+          ui/
+        chdir: "{{ docker_dir }}"
+      register: ui_build
+      changed_when: true
+
+    - name: Display UI build result
+      debug:
+        msg: "OpenTAKServer UI image built successfully"
+
+    - name: Push OpenTAKServer image to registry
+      command:
+        cmd: "docker push {{ registry_address }}/opentakserver:{{ ots_version }}"
+      register: ots_push_version
+
+    - name: Push OpenTAKServer latest tag to registry
+      command:
+        cmd: "docker push {{ registry_address }}/opentakserver:latest"
+      register: ots_push_latest
+
+    - name: Push UI image to registry
+      command:
+        cmd: "docker push {{ registry_address }}/opentakserver-ui:{{ ui_version }}"
+      register: ui_push_version
+
+    - name: Push UI latest tag to registry
+      command:
+        cmd: "docker push {{ registry_address }}/opentakserver-ui:latest"
+      register: ui_push_latest
+
+    - name: Verify images in registry
+      uri:
+        url: "http://{{ registry_address }}/v2/_catalog"
+        method: GET
+        return_content: yes
+      register: registry_catalog
+
+    - name: Display registry contents
+      debug:
+        msg: "Registry catalog: {{ registry_catalog.json }}"
+
+    - name: Delete existing OpenTAKServer deployment
+      kubernetes.core.k8s:
+        state: absent
+        api_version: apps/v1
+        kind: Deployment
+        name: opentakserver
+        namespace: tak
+      ignore_errors: yes
+
+    - name: Wait for deployment to be fully deleted
+      command: kubectl get deployment opentakserver -n tak
+      register: deployment_check
+      until: deployment_check.rc != 0
+      retries: 30
+      delay: 2
+      failed_when: false
+      changed_when: false
+
+    - name: Redeploy OpenTAKServer with patched images
+      kubernetes.core.k8s:
+        state: present
+        src: /tmp/ots-deployment-fixed.yaml
+
+    - name: Wait for pod to be running
+      command: kubectl get pods -n tak -l app=opentakserver -o jsonpath='{.items[0].status.phase}'
+      register: pod_status
+      until: pod_status.stdout == "Running"
+      retries: 60
+      delay: 5
+      changed_when: false
+
+    - name: Get pod name
+      command: kubectl get pod -n tak -l app=opentakserver -o jsonpath='{.items[0].metadata.name}'
+      register: pod_name
+      changed_when: false
+
+    - name: Verify Socket.IO patches in deployed container
+      command: >
+        kubectl exec -n tak {{ pod_name.stdout }} -c opentakserver --
+        grep "cors_allowed_origins" /app/venv/lib/python3.12/site-packages/opentakserver/extensions.py
+      register: patch_check
+      failed_when: false
+      changed_when: false
+
+    - name: Build complete summary
+      debug:
+        msg:
+          - "========================================="
+          - "Docker Images Built and Deployed Successfully!"
+          - "========================================="
+          - ""
+          - "Images available:"
+          - "  - {{ registry_address }}/opentakserver:{{ ots_version }}"
+          - "  - {{ registry_address }}/opentakserver:latest"
+          - "  - {{ registry_address }}/opentakserver-ui:{{ ui_version }}"
+          - "  - {{ registry_address }}/opentakserver-ui:latest"
+          - ""
+          - "Socket.IO patches applied:"
+          - "  ✓ CORS headers enabled (cors_allowed_origins='*')"
+          - "  ✓ RabbitMQ message_queue removed"
+          - "  ✓ Ping timeout increased to 60 seconds"
+          - ""
+          - "Deployment status:"
+          - "  Pod: {{ pod_name.stdout }}"
+          - "  Status: {{ pod_status.stdout }}"
+          - "  Patches verified: {{ 'YES' if patch_check.rc == 0 else 'NO (will use Python 3.12 path)' }}"
+          - ""
+          - "Access UI at: http://{{ registry_address.split(':')[0] }}:31080"
+          - ""
+          - "Check websocket logs: kubectl logs -n tak {{ pod_name.stdout }} -c nginx --tail=50 | grep socket.io"

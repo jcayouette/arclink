@@ -1,0 +1,51 @@
+---
+# Setup common configuration on all cluster nodes
+#
+# This playbook applies the common role to all nodes in the cluster.
+# It prepares nodes for K3s installation by:
+# - Installing required packages
+# - Configuring /etc/hosts
+# - Loading kernel modules
+# - Setting sysctl parameters
+# - Disabling swap
+#
+# Usage: ansible-playbook playbooks/setup-common.yml
+
+- name: Setup Common Configuration on All Nodes
+  hosts: all
+  gather_facts: yes
+  roles:
+    - common
+  
+  post_tasks:
+    - name: Display completion message
+      debug:
+        msg:
+          - "Common configuration complete for {{ inventory_hostname }}"
+          - "Node is ready for K3s installation"
+      run_once: no
+
+- name: Summary
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display setup summary
+      debug:
+        msg:
+          - "============================================"
+          - "COMMON SETUP COMPLETE"
+          - "============================================"
+          - ""
+          - "Configured {{ groups['all'] | length }} nodes:"
+          - "  - Masters: {{ groups['k3s_master'] | length }}"
+          - "  - Agents: {{ groups['k3s_agents'] | length }}"
+          - ""
+          - "✓ Packages installed"
+          - "✓ /etc/hosts configured"
+          - "✓ Kernel modules loaded"
+          - "✓ Sysctl settings applied"
+          - "✓ Swap disabled"
+          - ""
+          - "Next steps:"
+          - "  - Deploy Docker registry: ansible-playbook playbooks/deploy-registry.yml"
+          - "  - Deploy K3s cluster: ansible-playbook playbooks/deploy-k3s.yml"

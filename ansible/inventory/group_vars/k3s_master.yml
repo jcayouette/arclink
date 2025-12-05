@@ -1,0 +1,65 @@
+---
+# K3s Master Node Configuration
+
+# K3s Server Installation
+k3s_server_install_args: >-
+  --write-kubeconfig-mode=644
+  --disable=traefik
+  --disable=servicelb
+  --cluster-cidr={{ cluster_cidr }}
+  --service-cidr={{ service_cidr }}
+  --node-taint CriticalAddonsOnly=true:NoExecute
+
+# High Availability Configuration
+# When 3+ masters are defined, K3s automatically uses embedded etcd
+# First master should have k3s_master_primary: true in inventory
+k3s_ha_enabled: "{{ groups['k3s_master'] | length >= 3 }}"
+
+# Cluster initialization (only on first master)
+k3s_cluster_init: "{{ k3s_ha_enabled | bool }}"
+
+# For HA, additional masters join using this
+k3s_server_join_args: >-
+  {% if k3s_ha_enabled and not (k3s_master_primary | default(false)) %}
+  --server https://{{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}:6443
+  {% endif %}
+
+# API Server Configuration
+k3s_apiserver_args:
+  - "--advertise-address={{ ansible_host }}"
+  - "--bind-address=0.0.0.0"
+
+# Kube Controller Manager Args
+k3s_controller_manager_args: []
+
+# Kube Scheduler Args
+k3s_scheduler_args: []
+
+# Kubelet Args (for master)
+k3s_kubelet_args:
+  - "--node-ip={{ ansible_host }}"
+
+# etcd Configuration (for HA)
+k3s_etcd_args:
+  - "--etcd-expose-metrics=true"
+
+# Registry on master node
+registry_enabled: true
+registry_container_name: registry
+registry_volume: /var/lib/registry
+registry_restart_policy: unless-stopped
+
+# Kubeconfig location
+k3s_kubeconfig: /etc/rancher/k3s/k3s.yaml
+k3s_kubeconfig_local: "~/.kube/config"
+
+# Node labels for master
+k3s_node_labels:
+  - "node-role.kubernetes.io/master=true"
+  - "node.kubernetes.io/instance-type=raspberry-pi-5"
+
+# Rancher Configuration (Optional)
+rancher_enabled: false
+rancher_namespace: cattle-system
+rancher_hostname: "rancher.{{ domain }}"
+rancher_bootstrap_password: admin  # Change after first login

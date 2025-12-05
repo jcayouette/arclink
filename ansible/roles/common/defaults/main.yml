@@ -1,0 +1,28 @@
+---
+# Common role default variables
+# These can be overridden in group_vars or host_vars
+
+# System packages
+common_update_cache: true
+common_upgrade_packages: false
+
+# Hostname configuration
+common_set_hostname: false  # Set to true if you want Ansible to manage hostnames
+
+# /etc/hosts configuration
+common_manage_hosts_file: true
+common_hosts_entries: []  # Auto-populated from inventory
+
+# Kernel modules for K3s
+common_kernel_modules:
+  - br_netfilter
+  - overlay
+
+# Sysctl settings for K3s
+common_sysctl_settings:
+  net.bridge.bridge-nf-call-iptables: 1
+  net.bridge.bridge-nf-call-ip6tables: 1
+  net.ipv4.ip_forward: 1
+
+# Swap configuration
+common_disable_swap: true

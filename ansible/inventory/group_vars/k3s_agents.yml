@@ -1,0 +1,49 @@
+---
+# K3s Agent Node Configuration
+
+# K3s Agent Installation
+# Agents connect to the first master by default
+k3s_server_url: "https://{{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}:6443"
+
+k3s_agent_install_args: >-
+  --server {{ k3s_server_url }}
+  --node-ip={{ ansible_host }}
+
+# Kubelet Args (for agents)
+k3s_kubelet_args:
+  - "--node-ip={{ ansible_host }}"
+  - "--max-pods=110"
+
+# Node labels for agents
+k3s_node_labels:
+  - "node-role.kubernetes.io/worker=true"
+  - "node.kubernetes.io/instance-type=raspberry-pi-5"
+
+# Node taints (none by default, agents accept all workloads)
+k3s_node_taints: []
+
+# Container runtime configuration
+k3s_container_runtime_endpoint: unix:///run/k3s/containerd/containerd.sock
+
+# Resource reservations (optional)
+# Ensures system stability by reserving resources for OS
+k3s_system_reserved:
+  cpu: "100m"
+  memory: "512Mi"
+  ephemeral-storage: "1Gi"
+
+k3s_kube_reserved:
+  cpu: "100m"
+  memory: "512Mi"
+  ephemeral-storage: "1Gi"
+
+# Eviction thresholds (when to evict pods)
+k3s_eviction_hard:
+  memory.available: "100Mi"
+  nodefs.available: "5%"
+  imagefs.available: "5%"
+
+# Registry configuration (same as master)
+# Agents need registries.yaml to pull from insecure registry
+registry_enabled: false  # Registry container only runs on master
+registry_config_needed: true  # But agents need the config file

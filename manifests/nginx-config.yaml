@@ -1,0 +1,74 @@
+# Nginx Configuration for OpenTAKServer UI
+# Serves static web UI files and proxies API/Socket.IO requests to Flask backend
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: tak
+data:
+  nginx.conf: |
+    events {
+      worker_connections 1024;
+    }
+    http {
+      include /etc/nginx/mime.types;
+      default_type application/octet-stream;
+      # Backend upstream - Flask API on localhost port 8081
+      upstream ots_api {
+        server 127.0.0.1:8081;
+      }
+      server {
+        listen 8080;
+        server_name _;
+        client_max_body_size 100M;
+        root /usr/share/nginx/html;
+        index index.html;
+        
+        # Explicitly handle static assets first
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|mp3|webmanifest)$ {
+          expires 1y;
+          add_header Cache-Control "public, immutable";
+          try_files $uri =404;
+        }
+        
+        # Serve static UI files with SPA fallback
+        location / {
+          try_files $uri $uri/ /index.html;
+        }
+        
+        # API endpoints - proxy to Flask backend with session cookie forwarding
+        location /api {
+          proxy_pass http://ots_api;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_read_timeout 300;
+          proxy_connect_timeout 300;
+          proxy_pass_header Set-Cookie;
+          proxy_cookie_path / /;
+        }
+        
+        # Socket.IO WebSocket proxy - critical for real-time map updates
+        # Requires cookie forwarding to maintain Flask sessions
+        location /socket.io {
+          proxy_pass http://ots_api;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Origin $http_origin;
+          proxy_set_header Referer $http_referer;
+          proxy_set_header Cookie $http_cookie;
+          proxy_pass_header Set-Cookie;
+          proxy_cookie_path / /;
+          proxy_read_timeout 86400;
+          proxy_buffering off;
+          add_header Access-Control-Allow-Credentials true always;
+        }
+      }
+    }

@@ -1,0 +1,202 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ots-pvc
+  namespace: tak
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ots-cache-pvc
+  namespace: tak
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opentakserver
+  namespace: tak
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: opentakserver
+  template:
+    metadata:
+      labels:
+        app: opentakserver
+    spec:
+      initContainers:
+      - name: setup-ots
+        image: python:3.12
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -e
+            echo "Checking for cached OpenTAKServer installation..."
+            
+            # Check if opentakserver is already installed in cache
+            if [ -f /cache/.ots_installed ] && pip show opentakserver > /dev/null 2>&1; then
+              INSTALLED_VERSION=$(pip show opentakserver 2>/dev/null | grep "^Version:" | cut -d' ' -f2)
+              echo "Found cached OpenTAKServer version: $INSTALLED_VERSION"
+              echo "Checking for updates..."
+              LATEST_VERSION=$(pip index versions opentakserver 2>/dev/null | grep "opentakserver" | head -1 | grep -oP '\(\K[^\)]+' || echo "$INSTALLED_VERSION")
+              
+              if [ "$INSTALLED_VERSION" = "$LATEST_VERSION" ]; then
+                echo "Cache is up to date. Skipping installation."
+              else
+                echo "Update available: $LATEST_VERSION. Reinstalling..."
+                apt update && apt install -y ffmpeg curl
+                pip install --upgrade pip --root-user-action=ignore --cache-dir=/cache/pip
+                pip install opentakserver --root-user-action=ignore --cache-dir=/cache/pip --upgrade
+                echo "$LATEST_VERSION" > /cache/.ots_installed
+              fi
+            else
+              echo "No cache found. Installing OpenTAKServer..."
+              apt update && apt install -y ffmpeg curl
+              pip install --upgrade pip --root-user-action=ignore --cache-dir=/cache/pip
+              pip install opentakserver --root-user-action=ignore --cache-dir=/cache/pip
+              pip show opentakserver | grep "^Version:" | cut -d' ' -f2 > /cache/.ots_installed
+            fi
+            
+            echo "Creating config.yml..."
+            mkdir -p /home/ots/ots
+            cat > /home/ots/ots/config.yml << 'EOFCONFIG'
+            SQLALCHEMY_DATABASE_URI: postgresql+psycopg://ots:otspassword@postgres:5432/ots
+            OTS_RABBITMQ_SERVER_ADDRESS: rabbitmq
+            OTS_RABBITMQ_USERNAME: guest
+            OTS_RABBITMQ_PASSWORD: guest
+            OTS_DATA_FOLDER: /home/ots/ots
+            OTS_CA_FOLDER: /home/ots/ots/ca
+            UPLOAD_FOLDER: /home/ots/ots/uploads
+            OTS_LISTENER_ADDRESS: 0.0.0.0
+            OTS_NODE_ID: opentakserver-k3s
+            WTF_CSRF_ENABLED: false
+            SESSION_COOKIE_SAMESITE: Lax
+            SESSION_COOKIE_HTTPONLY: true
+            EOFCONFIG
+            echo "Setup complete!"
+        env:
+        - name: HOME
+          value: "/home/ots"
+        volumeMounts:
+        - name: ots-data
+          mountPath: /home/ots/ots
+        - name: ots-cache
+          mountPath: /cache
+      - name: build-ui
+        image: node:20-alpine
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            apk add --no-cache git
+            export npm_config_cache=/cache/npm
+            cd /tmp
+            git clone --depth 1 https://github.com/brian7704/OpenTAKServer-UI.git
+            cd OpenTAKServer-UI
+            npm install --legacy-peer-deps
+            npm run build
+            cp -r dist/* /ui/
+        volumeMounts:
+        - name: ui-files
+          mountPath: /ui
+        - name: ots-cache
+          mountPath: /cache
+      containers:
+      - name: ots
+        image: python:3.12
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -e
+            echo "Installing OpenTAKServer in main container..."
+            
+            # Install system dependencies first (needed for runtime)
+            apt update && apt install -y ffmpeg curl
+            
+            # Install OpenTAKServer from pip cache (this should be fast)
+            pip install --upgrade pip --root-user-action=ignore --cache-dir=/cache/pip
+            pip install opentakserver --root-user-action=ignore --cache-dir=/cache/pip
+            
+            cd /home/ots
+            echo "Starting OpenTAKServer..."
+            opentakserver
+        env:
+        - name: HOME
+          value: "/home/ots"
+        ports:
+        - containerPort: 8081
+          name: api
+        - containerPort: 8088
+          name: tcp-cot
+        - containerPort: 8089
+          name: ssl-cot
+        volumeMounts:
+        - name: ots-data
+          mountPath: /home/ots/ots
+        - name: ots-cache
+          mountPath: /cache
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        - name: ui-files
+          mountPath: /usr/share/nginx/html
+      volumes:
+      - name: ots-data
+        persistentVolumeClaim:
+          claimName: ots-pvc
+      - name: ots-cache
+        persistentVolumeClaim:
+          claimName: ots-cache-pvc
+      - name: nginx-config
+        configMap:
+          name: nginx-config
+      - name: ui-files
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opentakserver
+  namespace: tak
+spec:
+  type: NodePort
+  selector:
+    app: opentakserver
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+    nodePort: 31080
+  - name: api
+    port: 8081
+    targetPort: 8081
+    nodePort: 31081
+  - name: tcp-cot
+    port: 8088
+    targetPort: 8088
+    nodePort: 31088
+  - name: ssl-cot
+    port: 8089
+    targetPort: 8089
+    nodePort: 31089

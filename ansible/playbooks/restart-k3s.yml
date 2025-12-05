@@ -1,0 +1,62 @@
+---
+# Restart K3s services on all cluster nodes
+# Useful after configuration changes (e.g., registry updates)
+#
+# Usage: ansible-playbook playbooks/restart-k3s.yml
+
+- name: Restart K3s on Master Nodes
+  hosts: k3s_master
+  gather_facts: no
+  tasks:
+    - name: Restart K3s service on masters
+      systemd:
+        name: k3s
+        state: restarted
+      become: yes
+    
+    - name: Wait for K3s to be ready
+      wait_for:
+        port: 6443
+        host: "{{ ansible_host }}"
+        timeout: 60
+      delegate_to: localhost
+
+- name: Restart K3s on Agent Nodes
+  hosts: k3s_agents
+  gather_facts: no
+  tasks:
+    - name: Restart K3s agent service
+      systemd:
+        name: k3s-agent
+        state: restarted
+      become: yes
+    
+    - name: Wait a moment for agents to rejoin
+      pause:
+        seconds: 10
+
+- name: Verify Cluster
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Check all nodes are ready
+      command: kubectl get nodes
+      register: nodes_status
+      changed_when: false
+    
+    - name: Display node status
+      debug:
+        msg: "{{ nodes_status.stdout_lines }}"
+    
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "K3S RESTART COMPLETE"
+          - "============================================"
+          - ""
+          - "All K3s services restarted successfully"
+          - ""
+          - "Verify cluster:"
+          - "  kubectl get nodes"
+          - "  kubectl get pods -A"

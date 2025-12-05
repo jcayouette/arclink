@@ -1,0 +1,464 @@
+---
+# Deploy Longhorn distributed block storage
+# Provides persistent storage for the cluster with replication
+
+- name: Deploy Longhorn Storage System
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    longhorn_namespace: longhorn-system
+    longhorn_version: v1.7.2
+  environment:
+    KUBECONFIG: "{{ playbook_dir }}/../kubeconfig"
+  
+  tasks:
+    - name: Check if kubectl is available
+      command: kubectl version --client
+      register: kubectl_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Fail if kubectl not found
+      fail:
+        msg: "kubectl not found. Please install kubectl and configure KUBECONFIG"
+      when: kubectl_check.rc != 0
+    
+    - name: Check cluster connectivity
+      command: kubectl get nodes
+      register: cluster_check
+      changed_when: false
+      failed_when: cluster_check.rc != 0
+    
+    - name: Display cluster info
+      debug:
+        msg: "Deploying Longhorn to {{ (cluster_check.stdout_lines | length) - 1 }} node cluster"
+    
+    - name: Verify /mnt/longhorn exists on all nodes
+      shell: kubectl get nodes -o name
+      register: node_list
+      changed_when: false
+    
+    - name: Remove CriticalAddonsOnly taint from master nodes to allow Longhorn
+      shell: |
+        echo "Removing CriticalAddonsOnly taint from master nodes..."
+        kubectl taint nodes --selector='node-role.kubernetes.io/master' CriticalAddonsOnly=true:NoExecute- 2>/dev/null || true
+        kubectl taint nodes --selector='node-role.kubernetes.io/control-plane' CriticalAddonsOnly=true:NoExecute- 2>/dev/null || true
+        echo "✓ Taints removed"
+      register: remove_taints
+      changed_when: "'untainted' in remove_taints.stdout"
+    
+    - name: Annotate all nodes to disable default disk before Longhorn installation
+      shell: |
+        echo "Disabling default disk on all nodes..."
+        for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
+          kubectl annotate node $node --overwrite \
+            node.longhorn.io/create-default-disk=false
+          echo "  ✓ $node"
+        done
+      register: disable_default_disk
+      changed_when: true
+    
+    - name: Delete existing Longhorn namespace if present
+      command: kubectl delete namespace {{ longhorn_namespace }} --wait=false
+      register: ns_delete
+      failed_when: false
+      changed_when: ns_delete.rc == 0
+    
+    - name: Wait for namespace to be fully terminated
+      shell: |
+        echo "Waiting for {{ longhorn_namespace }} namespace to terminate..."
+        for i in {1..120}; do
+          if ! kubectl get namespace {{ longhorn_namespace }} 2>/dev/null; then
+            echo "✓ Namespace terminated successfully"
+            exit 0
+          fi
+          
+          # Show remaining resources
+          pod_count=$(kubectl get pods -n {{ longhorn_namespace }} --no-headers 2>/dev/null | wc -l || echo 0)
+          if [ $pod_count -gt 0 ]; then
+            echo "[$i/120] $pod_count pods still terminating..."
+          else
+            echo "[$i/120] Namespace finalizing..."
+          fi
+          sleep 5
+        done
+        
+        # Force remove finalizers if stuck
+        echo "⚠ Timeout reached, forcing namespace deletion..."
+        kubectl get namespace {{ longhorn_namespace }} -o json | \
+          jq '.spec.finalizers = []' | \
+          kubectl replace --raw /api/v1/namespaces/{{ longhorn_namespace }}/finalize -f - 2>/dev/null || true
+        
+        # Wait a bit more
+        for i in {1..10}; do
+          if ! kubectl get namespace {{ longhorn_namespace }} 2>/dev/null; then
+            echo "✓ Namespace terminated after forcing finalizers"
+            exit 0
+          fi
+          sleep 2
+        done
+        
+        echo "✓ Proceeding with deployment"
+        exit 0
+      register: ns_wait
+      changed_when: false
+    
+    - name: Create Longhorn namespace
+      command: kubectl create namespace {{ longhorn_namespace }}
+      register: ns_create
+      failed_when: ns_create.rc != 0 and 'AlreadyExists' not in ns_create.stderr
+      changed_when: ns_create.rc == 0
+    
+    - name: Download Longhorn deployment manifest
+      get_url:
+        url: "https://raw.githubusercontent.com/longhorn/longhorn/{{ longhorn_version }}/deploy/longhorn.yaml"
+        dest: /tmp/longhorn-original.yaml
+        mode: '0644'
+    
+    - name: Modify Longhorn manifest to use /mnt/longhorn
+      shell: |
+        sed 's|/var/lib/longhorn/|/mnt/longhorn/|g' /tmp/longhorn-original.yaml > /tmp/longhorn-custom.yaml
+        echo "Modified manifest to use /mnt/longhorn"
+      register: modify_manifest
+      changed_when: true
+    
+    - name: Install Longhorn via kubectl
+      command: kubectl apply -f /tmp/longhorn-custom.yaml
+      register: longhorn_install
+      changed_when: "'created' in longhorn_install.stdout or 'configured' in longhorn_install.stdout"
+    
+    - name: Monitor Longhorn manager pods startup
+      shell: |
+        echo "Monitoring Longhorn manager pod startup..."
+        echo "=========================================="
+        for i in {1..60}; do
+          ready=$(kubectl get pods -n {{ longhorn_namespace }} -l app=longhorn-manager --no-headers 2>/dev/null | grep -c "Running" || echo 0)
+          total=$(kubectl get pods -n {{ longhorn_namespace }} -l app=longhorn-manager --no-headers 2>/dev/null | wc -l || echo 0)
+          
+          if [ $total -eq 0 ]; then
+            echo "[$i/60] Waiting for manager pods to be created..."
+          elif [ $ready -eq $total ] && [ $ready -gt 0 ]; then
+            echo ""
+            echo "✓ All $ready manager pods are running"
+            kubectl wait --for=condition=ready pod -l app=longhorn-manager -n {{ longhorn_namespace }} --timeout=60s
+            exit 0
+          else
+            echo "[$i/60] Manager pods: $ready/$total running"
+            kubectl get pods -n {{ longhorn_namespace }} -l app=longhorn-manager --no-headers 2>/dev/null | awk '{print "  - " $1 ": " $3}'
+          fi
+          sleep 5
+        done
+        echo "⚠ Timeout waiting for manager pods"
+        exit 1
+      register: longhorn_wait
+      changed_when: false
+      retries: 2
+      delay: 10
+      until: longhorn_wait.rc == 0
+    
+    - name: Wait for Longhorn driver deployer to complete
+      command: >
+        kubectl wait --for=condition=ready pod
+        -l app=longhorn-driver-deployer
+        -n {{ longhorn_namespace }}
+        --timeout=180s
+      register: driver_wait
+      changed_when: false
+      failed_when: false
+    
+    - name: Check if UI and CSI deployments have pods
+      shell: |
+        echo "Checking deployment pod status..."
+        ui_pods=$(kubectl get pods -n {{ longhorn_namespace }} -l app=longhorn-ui --no-headers 2>/dev/null | wc -l || echo 0)
+        csi_pods=$(kubectl get pods -n {{ longhorn_namespace }} -l app=csi-attacher --no-headers 2>/dev/null | wc -l || echo 0)
+        
+        if [ $ui_pods -eq 0 ] || [ $csi_pods -eq 0 ]; then
+          echo "⚠ Deployments not creating pods, forcing replicaset recreation"
+          exit 1
+        fi
+        echo "✓ Deployment pods are being created"
+        exit 0
+      register: deployment_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Force recreate deployment replicasets if stuck
+      shell: |
+        echo "Forcing replicaset recreation to unstick deployments..."
+        kubectl delete rs -n {{ longhorn_namespace }} -l app=longhorn-ui 2>/dev/null || true
+        kubectl delete rs -n {{ longhorn_namespace }} -l app=csi-attacher 2>/dev/null || true
+        kubectl delete rs -n {{ longhorn_namespace }} -l app=csi-provisioner 2>/dev/null || true
+        kubectl delete rs -n {{ longhorn_namespace }} -l app=csi-resizer 2>/dev/null || true
+        kubectl delete rs -n {{ longhorn_namespace }} -l app=csi-snapshotter 2>/dev/null || true
+        kubectl delete rs -n {{ longhorn_namespace }} -l app=longhorn-driver-deployer 2>/dev/null || true
+        echo "✓ Replicasets deleted, Kubernetes will recreate them"
+        sleep 10
+      when: deployment_check.rc != 0
+      register: force_recreate
+      changed_when: true
+    
+    - name: Wait for deployment pods after recreation
+      shell: |
+        echo "Waiting for deployment pods to start..."
+        for i in {1..30}; do
+          ui_pods=$(kubectl get pods -n {{ longhorn_namespace }} -l app=longhorn-ui --no-headers 2>/dev/null | grep -c "Running" || echo 0)
+          if [ $ui_pods -gt 0 ]; then
+            echo "✓ UI pods are running"
+            exit 0
+          fi
+          echo "[$i/30] Waiting for UI pods..."
+          sleep 5
+        done
+        echo "⚠ UI pods may still be starting"
+        exit 0
+      when: force_recreate.changed
+      register: pod_wait
+      changed_when: false
+    
+    - name: Check if CSI plugin daemonset exists
+      shell: |
+        kubectl get daemonset longhorn-csi-plugin -n {{ longhorn_namespace }} 2>/dev/null
+        exit $?
+      register: csi_plugin_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Restart driver deployer if CSI plugin missing
+      shell: |
+        echo "⚠ CSI plugin daemonset not found, restarting driver deployer..."
+        kubectl rollout restart deployment/longhorn-driver-deployer -n {{ longhorn_namespace }}
+        echo "Waiting for CSI plugin daemonset to be created..."
+        for i in {1..30}; do
+          if kubectl get daemonset longhorn-csi-plugin -n {{ longhorn_namespace }} 2>/dev/null; then
+            echo "✓ CSI plugin daemonset created"
+            sleep 10
+            exit 0
+          fi
+          echo "[$i/30] Waiting for CSI plugin..."
+          sleep 2
+        done
+        echo "⚠ CSI plugin creation timeout"
+        exit 1
+      when: csi_plugin_check.rc != 0
+      register: driver_restart
+      changed_when: true
+    
+    - name: Wait for CSI plugin pods to be ready
+      command: >
+        kubectl wait --for=condition=ready pod
+        -l app=longhorn-csi-plugin
+        -n {{ longhorn_namespace }}
+        --timeout=60s
+      when: driver_restart.changed
+      register: csi_plugin_wait
+      changed_when: false
+      failed_when: false
+    
+    - name: Force recreate CSI deployment replicasets after CSI plugin is ready
+      shell: |
+        echo "Recreating CSI deployment replicasets with working CSI plugin..."
+        kubectl delete rs -n {{ longhorn_namespace }} -l app=csi-attacher 2>/dev/null || true
+        kubectl delete rs -n {{ longhorn_namespace }} -l app=csi-provisioner 2>/dev/null || true
+        kubectl delete rs -n {{ longhorn_namespace }} -l app=csi-resizer 2>/dev/null || true
+        kubectl delete rs -n {{ longhorn_namespace }} -l app=csi-snapshotter 2>/dev/null || true
+        echo "✓ Replicasets deleted, waiting for recreation..."
+        sleep 15
+      when: driver_restart.changed
+      register: csi_rs_recreate
+      changed_when: true
+    
+    - name: Monitor Longhorn node registration
+      shell: |
+        echo "Monitoring Longhorn node registration..."
+        echo "=========================================="
+        expected=$(kubectl get nodes --no-headers | wc -l)
+        for i in {1..30}; do
+          current=$(kubectl get nodes.longhorn.io -n {{ longhorn_namespace }} --no-headers 2>/dev/null | wc -l)
+          
+          if [ "$current" -eq "$expected" ]; then
+            echo ""
+            echo "✓ All $expected nodes registered in Longhorn"
+            kubectl get nodes.longhorn.io -n {{ longhorn_namespace }} --no-headers | awk '{print "  ✓ " $1}'
+            exit 0
+          fi
+          
+          echo "[$i/30] Nodes registered: $current/$expected"
+          if [ $current -gt 0 ]; then
+            kubectl get nodes.longhorn.io -n {{ longhorn_namespace }} --no-headers 2>/dev/null | awk '{print "  ✓ " $1}'
+            echo "  Waiting for remaining nodes..."
+          fi
+          sleep 10
+        done
+        echo ""
+        echo "⚠ Warning: Only $current of $expected nodes registered"
+        exit 0
+      register: node_wait
+      changed_when: false
+    
+    - name: Configure /mnt/longhorn disk on each node
+      shell: |
+        echo "Configuring /mnt/longhorn disks on all nodes..."
+        echo "=========================================="
+        node_count=0
+        total_nodes=$(kubectl get nodes --no-headers | wc -l)
+        
+        for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
+          node_count=$((node_count + 1))
+          echo "[$node_count/$total_nodes] Configuring disk on $node..."
+          
+          # Wait for node to be ready in Longhorn
+          for i in {1..30}; do
+            if kubectl get nodes.longhorn.io/$node -n {{ longhorn_namespace }} 2>/dev/null; then
+              echo "  ✓ Node exists in Longhorn"
+              break
+            fi
+            echo "  Waiting for node registration... ($i/30)"
+            sleep 2
+          done
+          
+          # Patch node to use ONLY /mnt/longhorn disk and enable scheduling
+          kubectl patch nodes.longhorn.io/$node -n {{ longhorn_namespace }} --type=merge -p '{
+            "spec": {
+              "allowScheduling": true,
+              "disks": {
+                "mnt-longhorn": {
+                  "allowScheduling": true,
+                  "evictionRequested": false,
+                  "path": "/mnt/longhorn",
+                  "storageReserved": 0,
+                  "tags": []
+                }
+              }
+            }
+          }' 2>/dev/null || echo "  ⚠ Patch failed, will retry"
+          
+          # Remove any default disk if it exists
+          if kubectl get nodes.longhorn.io/$node -n {{ longhorn_namespace }} -o json | grep -q "default-disk"; then
+            echo "  Removing default disk..."
+            default_disk=$(kubectl get nodes.longhorn.io/$node -n {{ longhorn_namespace }} -o json | jq -r '.spec.disks | keys[] | select(startswith("default-disk"))')
+            if [ -n "$default_disk" ]; then
+              kubectl patch nodes.longhorn.io/$node -n {{ longhorn_namespace }} --type=json -p "[
+                {\"op\": \"remove\", \"path\": \"/spec/disks/$default_disk\"}
+              ]" 2>/dev/null && echo "  ✓ Default disk removed"
+            fi
+          fi
+          
+          echo "  ✓ Disk configured: /mnt/longhorn"
+        done
+        echo ""
+        echo "✓ All disks configured"
+      register: disk_config
+      changed_when: true
+      retries: 3
+      delay: 10
+      until: disk_config.rc == 0
+    
+    - name: Wait for disks to be configured
+      pause:
+        seconds: 15
+        prompt: "Waiting for Longhorn to recognize disk configurations"
+    
+    - name: Verify disk configuration
+      shell: |
+        echo "Checking disk status on all nodes:"
+        kubectl get nodes.longhorn.io -n {{ longhorn_namespace }} -o json | \
+          jq -r '.items[] | "\(.metadata.name): \(.spec.disks | length) disk(s) configured"'
+      register: disk_status
+      changed_when: false
+    
+    - name: Display disk configuration
+      debug:
+        msg: "{{ disk_status.stdout_lines }}"
+    
+    - name: Get Longhorn service info
+      command: kubectl get svc -n {{ longhorn_namespace }}
+      register: longhorn_svc
+      changed_when: false
+    
+    - name: Check Longhorn pods status
+      command: kubectl get pods -n {{ longhorn_namespace }}
+      register: longhorn_pods
+      changed_when: false
+    
+    - name: Verify all deployments are ready
+      shell: |
+        echo "Checking deployment readiness..."
+        not_ready=$(kubectl get deployments -n {{ longhorn_namespace }} -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.readyReplicas}/{.spec.replicas}{"\n"}{end}' | grep "0/" || true)
+        if [ -n "$not_ready" ]; then
+          echo "⚠ Some deployments not fully ready:"
+          echo "$not_ready"
+          echo "This may be normal during startup"
+        else
+          echo "✓ All deployments ready"
+        fi
+        kubectl get deployments -n {{ longhorn_namespace }}
+        exit 0
+      register: deployment_status
+      changed_when: false
+    
+    - name: Set Longhorn as default StorageClass
+      shell: |
+        kubectl patch storageclass longhorn -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+      register: default_sc
+      changed_when: "'patched' in default_sc.stdout"
+      failed_when: default_sc.rc != 0 and 'NotFound' not in default_sc.stderr
+    
+    - name: Expose Longhorn UI via NodePort
+      shell: |
+        kubectl get svc longhorn-frontend-nodeport -n {{ longhorn_namespace }} 2>/dev/null || \
+        kubectl expose service longhorn-frontend -n {{ longhorn_namespace }} \
+          --type=NodePort \
+          --name=longhorn-frontend-nodeport \
+          --port=80 \
+          --target-port=http
+      register: nodeport_expose
+      changed_when: "'exposed' in nodeport_expose.stdout"
+      failed_when: nodeport_expose.rc != 0 and 'AlreadyExists' not in nodeport_expose.stderr
+    
+    - name: Get Longhorn NodePort
+      shell: kubectl get svc longhorn-frontend-nodeport -n {{ longhorn_namespace }} -o jsonpath='{.spec.ports[0].nodePort}'
+      register: longhorn_nodeport
+      changed_when: false
+    
+    - name: Get primary master node IP
+      shell: kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'
+      register: master_ip
+      changed_when: false
+    
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "LONGHORN DEPLOYMENT COMPLETE"
+          - "============================================"
+          - ""
+          - "Longhorn distributed storage is now running"
+          - "Namespace: {{ longhorn_namespace }}"
+          - "Version: {{ longhorn_version }}"
+          - "Disk Configuration: /mnt/longhorn (default disk disabled)"
+          - ""
+          - "Access Longhorn UI:"
+          - "  http://{{ master_ip.stdout }}:{{ longhorn_nodeport.stdout }}"
+          - ""
+          - "  Via Rancher: Navigate to Cluster → Service Discovery → Services"
+          - "  Or use kubectl port-forward:"
+          - "    kubectl port-forward -n {{ longhorn_namespace }} svc/longhorn-frontend 8080:80"
+          - ""
+          - "Longhorn UI Features:"
+          - "  - View all volumes and their health"
+          - "  - Monitor storage usage across nodes"
+          - "  - Check replica status and placement"
+          - "  - View snapshots and backups"
+          - "  - Monitor node disk usage at /mnt/longhorn"
+          - ""
+          - "Verify installation:"
+          - "  kubectl get pods -n {{ longhorn_namespace }}"
+          - "  kubectl get storageclass"
+          - "  kubectl get nodes.longhorn.io -n {{ longhorn_namespace }}"
+          - ""
+          - "Storage Classes:"
+          - "  - longhorn: RWO volumes (block storage)"
+          - "  - longhorn-static: Pre-provisioned volumes"
+          - ""
+          - "Longhorn is now the default StorageClass for PersistentVolumeClaims"
+          - "All volumes will use /mnt/longhorn on nodes 0-6"

@@ -1,0 +1,129 @@
+---
+# Deploy K3s Cluster
+#
+# This playbook deploys K3s on all cluster nodes:
+# - Masters: Installed with embedded etcd (if 3+ masters)
+# - Agents: Join the cluster and pull from local registry
+#
+# Prerequisites:
+# - Common setup complete (playbooks/setup-common.yml)
+# - Docker registry deployed (playbooks/deploy-registry.yml)
+#
+# Usage: ansible-playbook playbooks/deploy-k3s.yml
+
+- name: Deploy K3s Masters
+  hosts: k3s_master
+  gather_facts: yes
+  serial: 1  # Install masters one at a time
+  roles:
+    - k3s-master
+  
+  tasks:
+    - name: Fetch kubeconfig from primary master
+      fetch:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: "{{ playbook_dir }}/../kubeconfig"
+        flat: yes
+      when: k3s_master_primary | default(false)
+      become: yes
+    
+    - name: Update kubeconfig server address
+      delegate_to: localhost
+      replace:
+        path: "{{ playbook_dir }}/../kubeconfig"
+        regexp: 'https://127\.0\.0\.1:6443'
+        replace: "https://{{ ansible_host }}:6443"
+      when: k3s_master_primary | default(false)
+      become: no
+    
+    - name: Wait for master to be fully ready
+      command: k3s kubectl get nodes {{ inventory_hostname_short }}
+      register: node_ready
+      until: "'Ready' in node_ready.stdout"
+      retries: 30
+      delay: 5
+      become: yes
+      changed_when: false
+
+- name: Wait for all masters to join
+  hosts: k3s_master[0]
+  gather_facts: no
+  tasks:
+    - name: Check all master nodes are ready
+      command: k3s kubectl get nodes -l node-role.kubernetes.io/control-plane=true
+      register: masters_status
+      until: masters_status.stdout_lines | length >= (groups['k3s_master'] | length + 1)
+      retries: 20
+      delay: 10
+      become: yes
+      changed_when: false
+    
+    - name: Display master nodes
+      debug:
+        var: masters_status.stdout_lines
+
+- name: Deploy K3s Agents
+  hosts: k3s_agents
+  gather_facts: yes
+  roles:
+    - k3s-agent
+  
+  tasks:
+    - name: Wait for agent to join cluster
+      pause:
+        seconds: 10
+
+- name: Verify Cluster Status
+  hosts: k3s_master[0]
+  gather_facts: no
+  tasks:
+    - name: Get all cluster nodes
+      command: k3s kubectl get nodes -o wide
+      register: cluster_nodes
+      become: yes
+      changed_when: false
+    
+    - name: Display cluster status
+      debug:
+        var: cluster_nodes.stdout_lines
+    
+    - name: Check cluster info
+      command: k3s kubectl cluster-info
+      register: cluster_info
+      become: yes
+      changed_when: false
+    
+    - name: Display cluster info
+      debug:
+        var: cluster_info.stdout_lines
+
+- name: Summary
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "K3S CLUSTER DEPLOYMENT COMPLETE"
+          - "============================================"
+          - ""
+          - "Cluster Configuration:"
+          - "  - Masters: {{ groups['k3s_master'] | length }} nodes ({{ 'HA with etcd' if groups['k3s_master'] | length >= 3 else 'Single master' }})"
+          - "  - Agents: {{ groups['k3s_agents'] | length }} nodes"
+          - "  - Total: {{ groups['k3s_cluster'] | length }} nodes"
+          - ""
+          - "Kubeconfig saved to: ansible/kubeconfig"
+          - ""
+          - "Access cluster:"
+          - "  export KUBECONFIG={{ playbook_dir }}/../kubeconfig"
+          - "  kubectl get nodes"
+          - ""
+          - "Or from master:"
+          - "  ssh {{ hostvars[groups['k3s_master'][0]]['ansible_user'] }}@{{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}"
+          - "  sudo k3s kubectl get nodes"
+          - ""
+          - "Next steps:"
+          - "  - Install Longhorn: kubectl apply -f https://raw.githubusercontent.com/longhorn/longhorn/master/deploy/longhorn.yaml"
+          - "  - Deploy Rancher (optional)"
+          - "  - Deploy OpenTAKServer"

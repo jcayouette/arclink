@@ -1,0 +1,41 @@
+---
+# Setup kubectl access on primary master node (node0)
+
+- name: Setup kubectl on primary master
+  hosts: k3s_master[0]
+  gather_facts: yes
+  become: yes
+  
+  tasks:
+    - name: Create .kube directory for admin user
+      file:
+        path: "/home/{{ ansible_user }}/.kube"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Copy kubeconfig to admin user
+      copy:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: "/home/{{ ansible_user }}/.kube/config"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'
+        remote_src: yes
+
+    - name: Update kubeconfig server address
+      replace:
+        path: "/home/{{ ansible_user }}/.kube/config"
+        regexp: 'https://127\.0\.0\.1:6443'
+        replace: "https://{{ ansible_host }}:6443"
+
+    - name: Verify kubectl access
+      command: kubectl get nodes
+      become_user: "{{ ansible_user }}"
+      register: kubectl_output
+      changed_when: false
+
+    - name: Display kubectl verification
+      debug:
+        msg: "{{ kubectl_output.stdout_lines }}"

@@ -1,0 +1,36 @@
+# RabbitMQ Message Queue for OpenTAKServer
+# Handles asynchronous tasks (NOT used for Socket.IO - that runs in-process)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: tak
+spec:
+  replicas: 1  # Single instance sufficient for most deployments
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+      - name: rabbitmq
+        image: rabbitmq:3-alpine
+        ports:
+        - containerPort: 5672
+---
+# RabbitMQ service - internal cluster access only
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: tak
+spec:
+  selector:
+    app: rabbitmq
+  ports:
+  - port: 5672        # AMQP protocol port
+    targetPort: 5672

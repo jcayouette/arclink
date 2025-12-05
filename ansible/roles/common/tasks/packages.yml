@@ -1,0 +1,30 @@
+---
+# Package management tasks
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  when: common_update_cache | bool
+  become: yes
+
+- name: Upgrade all packages (if enabled)
+  apt:
+    upgrade: dist
+  when: common_upgrade_packages | bool
+  become: yes
+
+- name: Install common packages
+  apt:
+    name: "{{ common_packages }}"
+    state: present
+  become: yes
+
+- name: Install additional packages for K3s
+  apt:
+    name:
+      - socat
+      - conntrack
+      - ipset
+    state: present
+  become: yes

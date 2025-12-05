@@ -1,0 +1,140 @@
+---
+# System configuration tasks
+
+- name: Set hostname (if enabled)
+  hostname:
+    name: "{{ inventory_hostname_short }}"
+  when: common_set_hostname | bool
+  become: yes
+
+- name: Build /etc/hosts entries from inventory
+  set_fact:
+    common_hosts_entries: "{{ common_hosts_entries | default([]) + [{'ip': hostvars[item]['ansible_host'], 'hostname': item, 'short': item.split('.')[0]}] }}"
+  loop: "{{ groups['all'] }}"
+  run_once: yes
+  delegate_to: localhost
+  delegate_facts: yes
+
+- name: Configure /etc/hosts with all cluster nodes
+  lineinfile:
+    path: /etc/hosts
+    regexp: "^{{ item.ip }}\\s+"
+    line: "{{ item.ip }} {{ item.hostname }} {{ item.short }}"
+    state: present
+    backup: yes
+  loop: "{{ hostvars['localhost']['common_hosts_entries'] }}"
+  when: common_manage_hosts_file | bool
+  become: yes
+
+- name: Disable swap
+  command: swapoff -a
+  when: 
+    - common_disable_swap | bool
+    - ansible_swaptotal_mb > 0
+  become: yes
+
+- name: Remove swap from /etc/fstab
+  lineinfile:
+    path: /etc/fstab
+    regexp: '^\S+\s+\S+\s+swap'
+    state: absent
+    backup: yes
+  when: common_disable_swap | bool
+  become: yes
+
+- name: Ensure UTF-8 locale is configured for SSH sessions
+  copy:
+    content: |
+      export LANG=en_US.UTF-8
+      export LC_ALL=en_US.UTF-8
+    dest: /etc/profile.d/locale.sh
+    mode: '0755'
+    owner: root
+    group: root
+  become: yes
+
+- name: Generate en_US.UTF-8 locale (if not present)
+  shell: |
+    if ! locale -a | grep -q en_US.utf8; then
+      locale-gen en_US.UTF-8
+      update-locale LANG=en_US.UTF-8
+    fi
+  become: yes
+  changed_when: false
+  failed_when: false
+
+- name: Set system default locale
+  copy:
+    content: |
+      LANG=en_US.UTF-8
+      LC_ALL=en_US.UTF-8
+    dest: /etc/default/locale
+    mode: '0644'
+    owner: root
+    group: root
+  become: yes
+
+- name: Set environment locale
+  lineinfile:
+    path: /etc/environment
+    line: "{{ item }}"
+    create: yes
+    mode: '0644'
+  loop:
+    - "LANG=en_US.UTF-8"
+    - "LC_ALL=en_US.UTF-8"
+  become: yes
+
+- name: Disable SSH AcceptEnv for locale (use server locale)
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^AcceptEnv LANG LC_\*'
+    line: '# AcceptEnv LANG LC_* # Disabled to use server locale'
+    backup: yes
+  become: yes
+  notify: restart sshd
+
+- name: Enable MOTD printing in SSH
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?PrintMotd'
+    line: 'PrintMotd no'
+    backup: yes
+  become: yes
+  notify: restart sshd
+
+- name: Enable PAM for dynamic MOTD
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?UsePAM'
+    line: 'UsePAM yes'
+    backup: yes
+  become: yes
+  notify: restart sshd
+
+- name: Install Terminus fonts with Unicode support
+  apt:
+    name:
+      - fonts-terminus
+      - fonts-terminus-otb
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Configure console for UTF-8 with TerminusBold font (for direct HDMI console)
+  lineinfile:
+    path: /etc/default/console-setup
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    backup: yes
+  loop:
+    - { regexp: '^CHARMAP=', line: 'CHARMAP="UTF-8"' }
+    - { regexp: '^FONTFACE=', line: 'FONTFACE="TerminusBold"' }
+    - { regexp: '^FONTSIZE=', line: 'FONTSIZE="16"' }
+  become: yes
+
+- name: Apply console font settings
+  command: setupcon -f --force
+  become: yes
+  changed_when: false
+  failed_when: false

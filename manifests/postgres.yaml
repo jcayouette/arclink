@@ -1,0 +1,74 @@
+# PostgreSQL Database for OpenTAKServer
+# Provides persistent storage for users, missions, data packages, and TAK data
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tak
+---
+# Persistent storage claim for PostgreSQL data
+# Uses Longhorn for distributed storage across cluster nodes
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: tak
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi
+---
+# PostgreSQL deployment - single replica with persistent storage
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: tak
+spec:
+  replicas: 1  # Single instance - database requires ReadWriteOnce volume
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        env:
+        # Database credentials - change these for production!
+        - name: POSTGRES_USER
+          value: "ots"
+        - name: POSTGRES_PASSWORD
+          value: "otspassword"  # TODO: Use Kubernetes secrets in production
+        - name: POSTGRES_DB
+          value: "ots"
+        - name: PGDATA
+          value: "/var/lib/postgresql/data/pgdata"
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+      volumes:
+      - name: postgres-data
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+---
+# PostgreSQL service - internal cluster access only (no NodePort)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: tak
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432        # Internal cluster port
+    targetPort: 5432  # Container port

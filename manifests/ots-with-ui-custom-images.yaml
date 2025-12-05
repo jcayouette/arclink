@@ -1,0 +1,152 @@
+# OpenTAKServer Deployment with Custom Pre-built Images
+# Uses local Docker registry for fast pod startup (~10 seconds)
+# Includes Socket.IO performance fixes and static authentication secrets
+---
+# Persistent storage for OTS data, certificates, and uploads
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ots-pvc
+  namespace: tak
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opentakserver
+  namespace: tak
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # Required for ReadWriteOnce volumes
+  selector:
+    matchLabels:
+      app: opentakserver
+  template:
+    metadata:
+      labels:
+        app: opentakserver
+    spec:
+      initContainers:
+      # Init container creates config.yml with static secrets before OTS starts
+      # Static secrets prevent authentication issues on pod restarts
+      - name: setup-config
+        image: busybox
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            echo "Creating config.yml with static secrets..."
+            mkdir -p /home/ots/ots
+            cat > /home/ots/ots/config.yml << 'EOFCONFIG'
+            SQLALCHEMY_DATABASE_URI: postgresql+psycopg://ots:otspassword@postgres:5432/ots
+            OTS_RABBITMQ_SERVER_ADDRESS: rabbitmq
+            OTS_RABBITMQ_USERNAME: guest
+            OTS_RABBITMQ_PASSWORD: guest
+            OTS_SOCKETIO_MESSAGE_QUEUE: ''
+            OTS_DATA_FOLDER: /home/ots/ots
+            OTS_CA_FOLDER: /home/ots/ots/ca
+            UPLOAD_FOLDER: /home/ots/ots/uploads
+            OTS_LISTENER_ADDRESS: 0.0.0.0
+            OTS_NODE_ID: opentakserver-k3s
+            # CRITICAL: Static secrets prevent session invalidation on restarts
+            # Generate new secrets for production: openssl rand -hex 32
+            SECRET_KEY: 273f514aefa1ebe4f6fc84f62e4a5abd1e6f7f146d4e1576218ca7db7153e6e3
+            SECURITY_PASSWORD_SALT: DsM+0h3WaRatE00xYGSLCzYemVhclgahe/D9CTybzNE=
+            WTF_CSRF_ENABLED: true
+            WTF_CSRF_CHECK_DEFAULT: false
+            WTF_CSRF_TIME_LIMIT: null
+            SESSION_COOKIE_SAMESITE: Lax
+            SESSION_COOKIE_HTTPONLY: true
+            SESSION_COOKIE_SECURE: false
+            SESSION_COOKIE_NAME: session
+            SESSION_COOKIE_DOMAIN: null
+            EOFCONFIG
+            
+            echo "Config created successfully!"
+        volumeMounts:
+        - name: ots-data
+          mountPath: /home/ots/ots
+      containers:
+      # Main OTS container - Flask API with Socket.IO performance fixes
+      - name: ots
+        # Custom image from local registry with pre-installed dependencies
+        # Socket.IO patches: CORS enabled, no message_queue (runs in-process)
+        image: node0.research.core:5000/opentakserver:latest
+        imagePullPolicy: Always
+        command: ["/usr/local/bin/opentakserver"]
+        env:
+        - name: HOME
+          value: "/home/ots"
+        ports:
+        - containerPort: 8081
+          name: api
+        - containerPort: 8088
+          name: tcp-cot
+        - containerPort: 8089
+          name: ssl-cot
+        volumeMounts:
+        - name: ots-data
+          mountPath: /home/ots/ots
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 8081
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 8081
+          initialDelaySeconds: 10  # Fast startup with pre-built images
+          periodSeconds: 5
+      # Nginx sidecar - serves static UI and proxies to Flask API
+      - name: nginx
+        # Custom UI image with built static assets
+        image: node0.research.core:5000/opentakserver-ui:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+      volumes:
+      - name: ots-data
+        persistentVolumeClaim:
+          claimName: ots-pvc
+      - name: nginx-config
+        configMap:
+          name: nginx-config
+---
+# OpenTAKServer service - exposes web UI and CoT streaming ports
+apiVersion: v1
+kind: Service
+metadata:
+  name: opentakserver
+  namespace: tak
+spec:
+  type: NodePort  # External access on all cluster node IPs
+  selector:
+    app: opentakserver
+  ports:
+  - name: web
+    port: 8080
+    targetPort: 8080
+    nodePort: 31080      # Web UI: http://<node-ip>:31080
+  - name: api
+    port: 8081
+    targetPort: 8081     # Internal API (not exposed externally)
+  - name: tcp-cot
+    port: 8088
+    targetPort: 8088
+    nodePort: 31088      # TCP CoT streaming for TAK clients
+  - name: ssl-cot
+    port: 8089
+    targetPort: 8089
+    nodePort: 31089      # SSL CoT streaming for TAK clients

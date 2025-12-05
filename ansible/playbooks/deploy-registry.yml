@@ -1,0 +1,69 @@
+---
+# Deploy Docker Registry on Primary Master
+#
+# This playbook sets up a Docker registry on the first master node.
+# The registry will be used to store custom images for the cluster.
+#
+# Usage: ansible-playbook playbooks/deploy-registry.yml
+
+- name: Deploy Docker Registry
+  hosts: k3s_master[0]
+  gather_facts: yes
+  roles:
+    - docker-registry
+  
+  post_tasks:
+    - name: Test registry accessibility
+      uri:
+        url: "http://{{ ansible_host }}:{{ registry_port }}/v2/"
+        status_code: 200
+      register: registry_test
+    
+    - name: Display registry information
+      debug:
+        msg:
+          - "Docker Registry deployed successfully!"
+          - "Registry URL: http://{{ ansible_host }}:{{ registry_port }}"
+          - "Test from any node: curl http://{{ ansible_host }}:{{ registry_port }}/v2/"
+
+- name: Distribute Registry Configuration to All Nodes
+  hosts: k3s_cluster
+  gather_facts: no
+  tasks:
+    - name: Create K3s config directory
+      file:
+        path: /etc/rancher/k3s
+        state: directory
+        mode: '0755'
+      become: yes
+    
+    - name: Deploy registries.yaml configuration
+      template:
+        src: ../roles/docker-registry/templates/registries.yaml.j2
+        dest: /etc/rancher/k3s/registries.yaml
+        mode: '0644'
+      become: yes
+    
+    - name: Display configuration status
+      debug:
+        msg: "Registry configuration deployed to {{ inventory_hostname }}"
+
+- name: Summary
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "DOCKER REGISTRY DEPLOYMENT COMPLETE"
+          - "============================================"
+          - ""
+          - "Registry running on: {{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}:{{ hostvars[groups['k3s_master'][0]]['registry_port'] }}"
+          - "Configuration deployed to all {{ groups['k3s_cluster'] | length }} cluster nodes"
+          - ""
+          - "Next steps:"
+          - "  - Deploy K3s cluster: ansible-playbook playbooks/deploy-k3s.yml"
+          - ""
+          - "Test registry:"
+          - "  curl http://{{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}:5000/v2/"

@@ -1,0 +1,30 @@
+---
+# Kernel configuration for K3s
+
+- name: Load kernel modules
+  modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ common_kernel_modules }}"
+  become: yes
+
+- name: Ensure kernel modules load on boot
+  copy:
+    dest: /etc/modules-load.d/k3s.conf
+    content: |
+      # Kernel modules required for K3s
+      {% for module in common_kernel_modules %}
+      {{ module }}
+      {% endfor %}
+  become: yes
+  notify: reload systemd-modules-load
+
+- name: Configure sysctl settings for K3s
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: yes
+    sysctl_file: /etc/sysctl.d/99-k3s.conf
+  loop: "{{ common_sysctl_settings | dict2items }}"
+  become: yes

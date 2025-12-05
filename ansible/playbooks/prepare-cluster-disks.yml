@@ -1,0 +1,182 @@
+---
+# Prepare NVMe disks for K3s cluster with consistent partitioning
+# Creates: 50GB root partition + remaining space for Longhorn storage
+# WARNING: This will repartition disks - use ONLY on fresh installations
+
+- name: Partition NVMe Disks for K3s and Longhorn
+  hosts: k3s_cluster
+  become: yes
+  gather_facts: yes
+  vars:
+    root_partition_size: "50GiB"
+    longhorn_mount_path: /mnt/longhorn
+  
+  tasks:
+    - name: Check if this is a fresh installation
+      stat:
+        path: /etc/k3s-partitioning-done
+      register: partition_marker
+    
+    - name: Identify primary NVMe device
+      shell: |
+        lsblk -ndo NAME,TYPE,SIZE | grep disk | grep nvme | head -1 | awk '{print $1}'
+      register: nvme_device
+      changed_when: false
+    
+    - name: Set NVMe device path
+      set_fact:
+        nvme_disk: "/dev/{{ nvme_device.stdout }}"
+    
+    - name: Display disk to be partitioned
+      debug:
+        msg: 
+          - "WARNING: Will partition {{ nvme_disk }}"
+          - "This should only be run during initial setup"
+          - "Root partition: {{ root_partition_size }}"
+          - "Longhorn partition: Remaining space"
+    
+    - name: Pause for confirmation
+      pause:
+        prompt: "Press Enter to continue or Ctrl+C to abort"
+      when: not partition_marker.stat.exists
+    
+    - name: Install parted if not present
+      package:
+        name: parted
+        state: present
+    
+    - name: Check current partition layout
+      shell: parted {{ nvme_disk }} print
+      register: current_layout
+      changed_when: false
+      failed_when: false
+    
+    - name: Display current layout
+      debug:
+        msg: "{{ current_layout.stdout_lines }}"
+      when: not partition_marker.stat.exists
+    
+    - name: Create GPT partition table (only if needed)
+      shell: |
+        parted {{ nvme_disk }} --script mklabel gpt
+      when: 
+        - not partition_marker.stat.exists
+        - "'gpt' not in current_layout.stdout"
+    
+    - name: Create boot partition (512MB)
+      shell: |
+        parted {{ nvme_disk }} --script mkpart primary fat32 1MiB 513MiB
+        parted {{ nvme_disk }} --script set 1 boot on
+      when: not partition_marker.stat.exists
+    
+    - name: Create root partition (50GB)
+      shell: |
+        parted {{ nvme_disk }} --script mkpart primary ext4 513MiB {{ root_partition_size }}
+      when: not partition_marker.stat.exists
+    
+    - name: Create Longhorn partition (remaining space)
+      shell: |
+        parted {{ nvme_disk }} --script mkpart primary ext4 {{ root_partition_size }} 100%
+      when: not partition_marker.stat.exists
+    
+    - name: Wait for kernel to recognize new partitions
+      shell: partprobe {{ nvme_disk }} && sleep 2
+      when: not partition_marker.stat.exists
+    
+    - name: Format boot partition
+      filesystem:
+        fstype: vfat
+        dev: "{{ nvme_disk }}p1"
+        opts: -n BOOT
+      when: not partition_marker.stat.exists
+    
+    - name: Format root partition
+      filesystem:
+        fstype: ext4
+        dev: "{{ nvme_disk }}p2"
+        opts: -L rootfs
+      when: not partition_marker.stat.exists
+    
+    - name: Format Longhorn partition
+      filesystem:
+        fstype: ext4
+        dev: "{{ nvme_disk }}p3"
+        opts: -L longhorn
+      when: not partition_marker.stat.exists
+    
+    - name: Create Longhorn mount directory
+      file:
+        path: "{{ longhorn_mount_path }}"
+        state: directory
+        mode: '0755'
+    
+    - name: Mount Longhorn partition
+      mount:
+        path: "{{ longhorn_mount_path }}"
+        src: "{{ nvme_disk }}p3"
+        fstype: ext4
+        opts: defaults,noatime
+        state: mounted
+    
+    - name: Add Longhorn mount to fstab
+      mount:
+        path: "{{ longhorn_mount_path }}"
+        src: "{{ nvme_disk }}p3"
+        fstype: ext4
+        opts: defaults,noatime
+        state: present
+    
+    - name: Set proper permissions
+      file:
+        path: "{{ longhorn_mount_path }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+    
+    - name: Mark partitioning as complete
+      copy:
+        content: |
+          # K3s disk partitioning completed on {{ ansible_date_time.iso8601 }}
+          # Disk: {{ nvme_disk }}
+          # Root: {{ nvme_disk }}p2 ({{ root_partition_size }})
+          # Longhorn: {{ nvme_disk }}p3 (remaining space)
+        dest: /etc/k3s-partitioning-done
+        mode: '0644'
+    
+    - name: Verify final disk layout
+      shell: |
+        echo "=== Partition Layout ==="
+        lsblk {{ nvme_disk }}
+        echo ""
+        echo "=== Mount Points ==="
+        df -h {{ longhorn_mount_path }}
+      register: final_layout
+      changed_when: false
+    
+    - name: Display final layout
+      debug:
+        msg: "{{ final_layout.stdout_lines }}"
+
+- name: Summary
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "DISK PARTITIONING COMPLETE"
+          - "============================================"
+          - ""
+          - "All nodes now have:"
+          - "  - 512MB boot partition (nvme0n1p1)"
+          - "  - 50GB root partition (nvme0n1p2)"
+          - "  - Remaining space for Longhorn (nvme0n1p3)"
+          - ""
+          - "Next steps:"
+          - "  1. Install OS on root partition"
+          - "  2. Deploy K3s cluster"
+          - "  3. Deploy Longhorn - it will use /mnt/longhorn"
+          - ""
+          - "Note: Longhorn partition is already mounted and in fstab"

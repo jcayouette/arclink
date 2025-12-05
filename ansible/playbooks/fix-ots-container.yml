@@ -1,0 +1,121 @@
+---
+# Quick fix for OpenTAKServer container command issue
+# Run from WSL: ansible-playbook playbooks/fix-ots-container.yml -i inventory/production.yml
+
+- name: Fix and Redeploy OpenTAKServer
+  hosts: localhost
+  gather_facts: no
+  vars:
+    ots_namespace: tak
+    ots_version: "1.6.3"
+    registry_address: "{{ groups['k3s_master'][0] }}:5000"
+    postgres_password: "ChangeMeInProduction"
+    postgres_user: ots
+    rabbitmq_password: "ChangeMeInProduction"
+  
+  tasks:
+    - name: Delete existing OpenTAKServer deployment
+      kubernetes.core.k8s:
+        state: absent
+        api_version: apps/v1
+        kind: Deployment
+        name: opentakserver
+        namespace: "{{ ots_namespace }}"
+      ignore_errors: yes
+
+    - name: Wait for deployment deletion
+      pause:
+        seconds: 10
+
+    - name: Deploy corrected OpenTAKServer
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: opentakserver
+            namespace: "{{ ots_namespace }}"
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: opentakserver
+            template:
+              metadata:
+                labels:
+                  app: opentakserver
+              spec:
+                initContainers:
+                - name: setup-config
+                  image: busybox
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      mkdir -p /home/ots/ots
+                      cat > /home/ots/ots/config.yml << 'EOFCONFIG'
+                      SQLALCHEMY_DATABASE_URI: postgresql+psycopg://{{ postgres_user }}:{{ postgres_password }}@postgres:5432/ots
+                      OTS_RABBITMQ_SERVER_ADDRESS: rabbitmq
+                      OTS_RABBITMQ_USERNAME: guest
+                      OTS_RABBITMQ_PASSWORD: {{ rabbitmq_password }}
+                      OTS_SOCKETIO_MESSAGE_QUEUE: ''
+                      OTS_DATA_FOLDER: /home/ots/ots
+                      OTS_CA_FOLDER: /home/ots/ots/ca
+                      UPLOAD_FOLDER: /home/ots/ots/uploads
+                      OTS_LISTENER_ADDRESS: 0.0.0.0
+                      OTS_NODE_ID: opentakserver-k3s
+                      SECRET_KEY: 273f514aefa1ebe4f6fc84f62e4a5abd1e6f7f146d4e1576218ca7db7153e6e3
+                      SECURITY_PASSWORD_SALT: DsM+0h3WaRatE00xYGSLCzYemVhclgahe/D9CTybzNE=
+                      WTF_CSRF_ENABLED: true
+                      WTF_CSRF_CHECK_DEFAULT: false
+                      WTF_CSRF_TIME_LIMIT: null
+                      SESSION_COOKIE_SAMESITE: Lax
+                      SESSION_COOKIE_HTTPONLY: true
+                      SESSION_COOKIE_SECURE: false
+                      SESSION_COOKIE_NAME: session
+                      SESSION_COOKIE_DOMAIN: null
+                      EOFCONFIG
+                  volumeMounts:
+                  - name: ots-data
+                    mountPath: /home/ots/ots
+                containers:
+                - name: opentakserver
+                  image: "{{ registry_address }}/opentakserver:{{ ots_version }}"
+                  env:
+                  - name: HOME
+                    value: "/home/ots"
+                  ports:
+                  - containerPort: 8081
+                    name: api
+                  - containerPort: 8088
+                    name: tcp-cot
+                  - containerPort: 8089
+                    name: ssl-cot
+                  volumeMounts:
+                  - name: ots-data
+                    mountPath: /home/ots/ots
+                volumes:
+                - name: ots-data
+                  emptyDir: {}
+
+    - name: Wait for OpenTAKServer pod to be created
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ ots_namespace }}"
+        label_selectors:
+          - app=opentakserver
+      register: ots_pods
+      until: ots_pods.resources | length > 0
+      retries: 20
+      delay: 3
+
+    - name: Display pod status
+      debug:
+        msg: "OpenTAKServer pod status: {{ ots_pods.resources[0].status.phase if ots_pods.resources | length > 0 else 'Not found' }}"
+
+    - name: Display success message
+      debug:
+        msg:
+          - "OpenTAKServer redeployed successfully!"
+          - "Check status on node0 with: kubectl get pods -n tak"
+          - "View logs with: kubectl logs -n tak -l app=opentakserver"

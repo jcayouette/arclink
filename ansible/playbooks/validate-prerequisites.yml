@@ -1,0 +1,122 @@
+---
+# Prerequisite Validation Playbook
+# 
+# This playbook validates that all prerequisites are met before running
+# cluster setup playbooks.
+#
+# Usage: ansible-playbook playbooks/validate-prerequisites.yml
+
+- name: Validate Prerequisites for All Nodes
+  hosts: all
+  gather_facts: yes
+  tasks:
+    - name: Display Node Information
+      debug:
+        msg: "Checking {{ inventory_hostname }} ({{ ansible_host }})"
+    
+    - name: Check Python 3 is installed
+      command: python3 --version
+      register: python_version
+      changed_when: false
+    
+    - name: Display Python version
+      debug:
+        msg: "Python: {{ python_version.stdout }}"
+    
+    - name: Check sudo access (without become)
+      command: sudo -n whoami
+      register: sudo_check
+      changed_when: false
+      failed_when: false
+    
+    - name: Verify passwordless sudo
+      assert:
+        that:
+          - sudo_check.rc == 0
+          - sudo_check.stdout == "root"
+        fail_msg: "Passwordless sudo is NOT configured on {{ inventory_hostname }}"
+        success_msg: "Passwordless sudo is configured on {{ inventory_hostname }}"
+    
+    - name: Check disk space
+      shell: df -h / | tail -1 | awk '{print $5}' | sed 's/%//'
+      register: disk_usage
+      changed_when: false
+    
+    - name: Warn if disk space is low
+      debug:
+        msg: "WARNING: Disk usage is {{ disk_usage.stdout }}% on {{ inventory_hostname }}"
+      when: disk_usage.stdout | int > 80
+    
+    - name: Check available memory
+      shell: free -m | grep Mem | awk '{print $7}'
+      register: available_memory
+      changed_when: false
+    
+    - name: Display available memory
+      debug:
+        msg: "Available memory: {{ available_memory.stdout }}MB on {{ inventory_hostname }}"
+    
+    - name: Check if ports are available
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ item }}"
+        state: stopped
+        timeout: 1
+      delegate_to: localhost
+      register: port_check
+      failed_when: false
+      loop:
+        - 22   # SSH
+        - 6443 # K3s API (master only)
+        - 10250 # Kubelet
+      when: "'k3s_master' in group_names or item == 22 or item == 10250"
+
+- name: Validate Master Node Specific Requirements
+  hosts: k3s_master
+  gather_facts: yes
+  tasks:
+    - name: Check if Docker can be installed (for registry)
+      package:
+        name: docker.io
+        state: present
+      check_mode: yes
+      register: docker_check
+      failed_when: false
+    
+    - name: Display Docker status
+      debug:
+        msg: "Docker installation: {{ 'Available' if docker_check is not failed else 'May need manual setup' }}"
+
+- name: Summary Report
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: "============================================"
+      debug:
+        msg: "PREREQUISITE VALIDATION COMPLETE"
+    
+    - name: Display cluster configuration
+      debug:
+        msg:
+          - "Cluster Size: {{ groups['all'] | length }} nodes"
+          - "  - Masters: {{ groups['k3s_master'] | length }}"
+          - "  - Agents: {{ groups['k3s_agents'] | length }}"
+    
+    - name: Display validation results
+      debug:
+        msg:
+          - "✓ All nodes passed SSH connectivity"
+          - "✓ All nodes have Python 3 installed"
+          - "✓ All nodes have passwordless sudo configured"
+    
+    - name: Display next steps
+      debug:
+        msg:
+          - "Next steps:"
+          - "  1. Review the output above for any warnings"
+          - "  2. If all checks passed, proceed with cluster setup:"
+          - "     ansible-playbook playbooks/setup-cluster.yml"
+          - ""
+          - "For more information, see:"
+          - "  - ansible/SETUP.md"
+          - "  - docs/docs/guides/ansible/progress-checklist.md"

@@ -1,0 +1,75 @@
+---
+- name: Install Docker on Control Node
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  become: yes
+
+  tasks:
+    - name: Check if Docker is already installed
+      command: docker --version
+      register: docker_check
+      failed_when: false
+      changed_when: false
+
+    - name: Display Docker version if installed
+      debug:
+        msg: "Docker is already installed: {{ docker_check.stdout }}"
+      when: docker_check.rc == 0
+
+    - name: Install Docker packages
+      apt:
+        name:
+          - docker.io
+          - qemu-user-static
+          - binfmt-support
+        state: present
+        update_cache: yes
+      when: docker_check.rc != 0
+
+    - name: Ensure Docker service is enabled and started
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
+      when: docker_check.rc != 0
+
+    - name: Add current user to docker group
+      user:
+        name: "{{ ansible_user_id }}"
+        groups: docker
+        append: yes
+      when: docker_check.rc != 0
+
+    - name: Setup QEMU for cross-platform builds
+      command: docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+      register: qemu_setup
+      changed_when: true
+
+    - name: Verify ARM64 emulation
+      command: docker run --rm --platform linux/arm64 arm64v8/alpine uname -m
+      register: arm64_test
+      changed_when: false
+
+    - name: Display ARM64 test result
+      debug:
+        msg: "ARM64 emulation working: {{ arm64_test.stdout }}"
+
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "DOCKER INSTALLATION COMPLETE"
+          - "============================================"
+          - ""
+          - "Docker installed with cross-platform support"
+          - "QEMU configured for ARM64 builds"
+          - ""
+          - "IMPORTANT: Docker group membership requires:"
+          - "  - Log out and back in (recommended)"
+          - "  - OR open a new terminal session"
+          - "  - OR run 'newgrp docker' in current shell"
+          - ""
+          - "Verify installation:"
+          - "  docker --version"
+          - "  docker run --rm hello-world"

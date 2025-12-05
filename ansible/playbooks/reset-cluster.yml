@@ -1,0 +1,187 @@
+---
+# Complete Cluster Reset Playbook
+#
+# This playbook completely removes K3s, Docker, Rancher, and all related
+# configurations from all cluster nodes.
+#
+# WARNING: This will destroy your cluster and all data!
+#
+# Usage: ansible-playbook playbooks/reset-cluster.yml
+
+- name: Confirm Reset
+  hosts: localhost
+  gather_facts: no
+  vars_prompt:
+    - name: confirm_reset
+      prompt: "This will DESTROY your cluster and all data. Type 'yes' to confirm"
+      private: no
+  
+  tasks:
+    - name: Verify confirmation
+      assert:
+        that:
+          - confirm_reset == "yes"
+        fail_msg: "Reset cancelled - confirmation not provided"
+
+- name: Uninstall K3s from Masters
+  hosts: k3s_master
+  gather_facts: no
+  tasks:
+    - name: Check if K3s uninstall script exists
+      stat:
+        path: /usr/local/bin/k3s-uninstall.sh
+      register: k3s_uninstall
+      become: yes
+    
+    - name: Uninstall K3s
+      command: /usr/local/bin/k3s-uninstall.sh
+      when: k3s_uninstall.stat.exists
+      become: yes
+      ignore_errors: yes
+
+- name: Uninstall K3s from Agents
+  hosts: k3s_agents
+  gather_facts: no
+  tasks:
+    - name: Check if K3s agent uninstall script exists
+      stat:
+        path: /usr/local/bin/k3s-agent-uninstall.sh
+      register: k3s_agent_uninstall
+      become: yes
+    
+    - name: Uninstall K3s agent
+      command: /usr/local/bin/k3s-agent-uninstall.sh
+      when: k3s_agent_uninstall.stat.exists
+      become: yes
+      ignore_errors: yes
+
+- name: Remove Docker and Registry
+  hosts: k3s_master
+  gather_facts: no
+  tasks:
+    - name: Stop and remove registry container
+      shell: docker rm -f registry 2>/dev/null || true
+      become: yes
+      ignore_errors: yes
+    
+    - name: Remove Docker packages
+      apt:
+        name:
+          - docker.io
+          - docker-compose
+          - docker-compose-plugin
+          - docker-ce
+          - docker-ce-cli
+          - docker-ce-rootless-extras
+          - containerd.io
+        state: absent
+        purge: yes
+      become: yes
+      ignore_errors: yes
+
+- name: Clean Up All Nodes
+  hosts: all
+  gather_facts: no
+  tasks:
+    - name: Remove K3s directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/rancher
+        - /var/lib/rancher
+        - /var/lib/kubelet
+        - /var/lib/cni
+        - /etc/cni
+        - /opt/cni
+      become: yes
+      ignore_errors: yes
+    
+    - name: Remove Docker directories (masters only)
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/docker
+        - /etc/docker
+      when: "'k3s_master' in group_names"
+      become: yes
+      ignore_errors: yes
+    
+    - name: Remove Longhorn storage
+      file:
+        path: /var/lib/longhorn
+        state: absent
+      become: yes
+      ignore_errors: yes
+    
+    - name: Kill remaining K3s processes
+      shell: pkill -9 k3s 2>/dev/null || true
+      become: yes
+      ignore_errors: yes
+    
+    - name: Kill remaining containerd processes
+      shell: pkill -9 containerd 2>/dev/null || true
+      become: yes
+      ignore_errors: yes
+    
+    - name: Flush iptables rules
+      shell: |
+        iptables -F
+        iptables -t nat -F
+        iptables -t mangle -F
+        iptables -X
+      become: yes
+      ignore_errors: yes
+    
+    - name: Remove kernel modules
+      shell: |
+        modprobe -r overlay 2>/dev/null || true
+        modprobe -r br_netfilter 2>/dev/null || true
+      become: yes
+      ignore_errors: yes
+
+- name: Clean Up Control Node
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Remove kubeconfig
+      file:
+        path: "{{ playbook_dir }}/../kubeconfig"
+        state: absent
+      ignore_errors: yes
+
+- name: Verify Cleanup
+  hosts: all
+  gather_facts: no
+  tasks:
+    - name: Check for remaining K3s processes
+      shell: ps aux | grep -E 'k3s|containerd' | grep -v grep || echo 'No K3s processes found'
+      register: k3s_check
+      become: yes
+      changed_when: false
+    
+    - name: Display K3s process check
+      debug:
+        var: k3s_check.stdout_lines
+
+- name: Summary
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "CLUSTER RESET COMPLETE"
+          - "============================================"
+          - ""
+          - "All cluster components removed from {{ groups['k3s_cluster'] | length }} nodes!"
+          - ""
+          - "Next steps to redeploy:"
+          - "  1. ansible-playbook playbooks/setup-common.yml"
+          - "  2. ansible-playbook playbooks/deploy-registry.yml"
+          - "  3. ansible-playbook playbooks/deploy-k3s.yml"
+          - ""
+          - "Note: System configuration (kernel modules, /etc/hosts) preserved"
+          - "      Re-run setup-common.yml if needed"

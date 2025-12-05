@@ -1,0 +1,15 @@
+---
+# Handlers for docker-registry role
+
+- name: restart docker
+  systemd:
+    name: docker
+    state: restarted
+  become: yes
+
+- name: restart k3s
+  systemd:
+    name: "{{ 'k3s' if 'k3s_master' in group_names else 'k3s-agent' }}"
+    state: restarted
+  become: yes
+  when: "'k3s_cluster' in group_names"

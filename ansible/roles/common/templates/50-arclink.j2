@@ -1,0 +1,242 @@
+#!/bin/bash
+# Arclink MOTD Script - Dual mode (Console ASCII / SSH Unicode)
+# Managed by Ansible
+
+# Colors
+BLUE="\e[94m"; CYAN="\e[96m"; BRIGHT="\e[96m"; BOLD="\e[1m"; RESET="\e[0m"; DIM="\e[2m"
+
+###############################################################################
+# DETECT SESSION TYPE
+###############################################################################
+# Check if we're on a console (tty) or SSH session
+IS_CONSOLE=false
+if [ -n "$SSH_TTY" ] || [ -n "$SSH_CLIENT" ] || [ -n "$SSH_CONNECTION" ]; then
+    IS_CONSOLE=false
+else
+    # Check if we're on a real console (tty1-6)
+    case "$(tty)" in
+        /dev/tty[1-6]) IS_CONSOLE=true ;;
+        *) IS_CONSOLE=false ;;
+    esac
+fi
+
+###############################################################################
+# BASIC INFO
+###############################################################################
+HOST=$(hostname)
+NODE_IP=$(hostname -I | awk '{print $1}')
+OS_VERSION=$(lsb_release -d | cut -f2)
+K3S_VERSION=$(k3s --version 2>/dev/null | head -n1)
+K3S_STATUS=$(systemctl is-active k3s 2>/dev/null)
+
+###############################################################################
+# DOMAIN DETECTION
+###############################################################################
+DOMAIN=$(hostname -d 2>/dev/null)
+[ -z "$DOMAIN" ] && DOMAIN=$(hostname -f | cut -d'.' -f2-)
+[ -z "$DOMAIN" ] && DOMAIN=$(awk '/search/{print $2}' /etc/resolv.conf)
+[ -z "$DOMAIN" ] && DOMAIN="research.core"
+
+if [[ "$DOMAIN" == "research.core" ]]; then 
+    ENV_LABEL="LAB ENVIRONMENT"
+elif [[ "$DOMAIN" == "tak.dev" ]]; then 
+    ENV_LABEL="DEVELOPMENT ENVIRONMENT"
+elif [[ "$DOMAIN" == "tak.field" ]]; then 
+    ENV_LABEL="FIELD DEPLOYMENT"
+else 
+    ENV_LABEL="UNKNOWN ENVIRONMENT"
+fi
+
+ENV_DISPLAY="${ENV_LABEL} (${DOMAIN})"
+
+RANCHER_URL="https://rancher.${DOMAIN}:30443"
+LONGHORN_URL="http://${HOST}.${DOMAIN}:30630/"
+
+###############################################################################
+# CPU / MEMORY
+###############################################################################
+if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
+    CPU_TEMP=$(printf "%.1f" "$(($(cat /sys/class/thermal/thermal_zone0/temp)/1000))")
+else
+    CPU_TEMP="N/A"
+fi
+
+LOAD_AVG=$(awk '{print $1", "$2", "$3}' /proc/loadavg)
+
+MEM_TOTAL=$(free -m | awk '/Mem:/ {print $2}')
+MEM_USED=$(free -m | awk '/Mem:/ {print $3}')
+MEM_PCT=$(awk "BEGIN {printf \"%.0f\", ($MEM_USED / $MEM_TOTAL) * 100}")
+
+# Memory usage bar
+FILLED=$(( MEM_PCT / 5 ))
+EMPTY=$(( 20 - FILLED ))
+[ $FILLED -lt 2 ] && FILLED=2
+[ $EMPTY -lt 0 ] && EMPTY=0
+MEM_BAR="$(printf "%0.s#" $(seq 1 $FILLED))$(printf "%0.s-" $(seq 1 $EMPTY))"
+
+###############################################################################
+# K3S NODES + POD COUNT
+###############################################################################
+MASTERS=$(kubectl get nodes --selector='node-role.kubernetes.io/master' -o wide 2>/dev/null | awk 'NR>1{print "  - "$1}')
+WORKERS=$(kubectl get nodes --selector='!node-role.kubernetes.io/master' -o wide 2>/dev/null | awk 'NR>1{print "  - "$1}')
+POD_COUNT=$(kubectl get pods -A -o wide 2>/dev/null | grep -w "$HOST" | wc -l)
+
+NODE_READY=$(kubectl get node "$HOST" -o json 2>/dev/null | jq -r \
+    '.status.conditions[] | select(.type=="Ready") | .status')
+
+###############################################################################
+# STORAGE
+###############################################################################
+if mountpoint -q /mnt/longhorn; then
+    LH_PCT=$(df -h /mnt/longhorn | awk 'NR==2{print $5}' | tr -d '%')
+    LH_FREE=$(df -h /mnt/longhorn | awk 'NR==2{print $4}')
+else
+    LH_PCT=0; LH_FREE="N/A"
+fi
+
+ROOT_PCT=$(df -h / | awk 'NR==2{print $5}' | tr -d '%')
+ROOT_FREE=$(df -h / | awk 'NR==2{print $4}')
+
+ascii_bar() {
+    local pct=$1
+    local len=20
+    local filled=$(( pct * len / 100 ))
+    [ $filled -lt 2 ] && filled=2
+    local empty=$(( len - filled ))
+    printf "%0.s#" $(seq 1 $filled)
+    printf "%0.s-" $(seq 1 $empty)
+}
+
+LH_BAR=$(ascii_bar $LH_PCT)
+ROOT_BAR=$(ascii_bar $ROOT_PCT)
+
+###############################################################################
+# OUTPUT - CONSOLE VERSION (Standard ASCII)
+###############################################################################
+if [ "$IS_CONSOLE" = true ]; then
+echo -e "
+═══════════════════════════════════════════════════════════════
+
+   \e[96m\e[1m █████╗ ██████╗  ██████╗\e[93m██╗     ██╗███╗   ██╗██╗  ██╗${RESET}
+   \e[96m\e[1m██╔══██╗██╔══██╗██╔════╝\e[93m██║     ██║████╗  ██║██║ ██╔╝${RESET}
+   \e[96m\e[1m███████║██████╔╝██║     \e[93m██║     ██║██╔██╗ ██║█████╔╝ ${RESET}
+   \e[96m\e[1m██╔══██║██╔══██╗██║     \e[93m██║     ██║██║╚██╗██║██╔═██╗ ${RESET}
+   \e[96m\e[1m██║  ██║██║  ██║╚██████╗\e[93m███████╗██║██║ ╚████║██║  ██╗${RESET}
+   \e[96m\e[1m╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝\e[93m╚══════╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝${RESET}
+
+    ${CYAN}Arclink Tactical Operations Platform${RESET}
+    Node: \e[96m\e[1m${HOST}${RESET}
+    Environment: ${CYAN}${ENV_DISPLAY}${RESET}
+
+═══════════════════════════════════════════════════════════════
+
+
+${BOLD}${CYAN}SYSTEM STATUS${RESET}
+───────────────────────
+• OS:   ${BRIGHT}$OS_VERSION${RESET}
+• K3s:  ${BRIGHT}$K3S_VERSION${RESET}
+• IP:   ${BRIGHT}$NODE_IP${RESET}
+• Pods Scheduled Here: ${BRIGHT}${POD_COUNT}${RESET}
+
+
+${BOLD}${CYAN}NODE HEALTH${RESET}
+───────────────────────
+• CPU Temp: ${BRIGHT}${CPU_TEMP}°C${RESET}
+• Load Avg: ${BRIGHT}${LOAD_AVG}${RESET}
+• Memory:   ${BRIGHT}${MEM_USED}/${MEM_TOTAL}MB (${MEM_PCT}%)${RESET}
+• Usage:    [${MEM_BAR}]
+• Ready:    ${BRIGHT}${NODE_READY}${RESET}
+
+
+${BOLD}${CYAN}CLUSTER NODES${RESET}
+───────────────────────
+• Masters:
+${MASTERS}
+
+• Workers:
+${WORKERS}
+
+
+${BOLD}${CYAN}SERVICES${RESET}
+───────────────────────
+• Rancher UI:   ${BRIGHT}${RANCHER_URL}${RESET}
+• Longhorn UI:  ${BRIGHT}${LONGHORN_URL}${RESET}
+
+
+${BOLD}${CYAN}STORAGE${RESET}
+───────────────────────
+• Longhorn Free: ${BRIGHT}${LH_FREE}${RESET} (${LH_PCT}%)
+  [${LH_BAR}]
+
+• Root Free:     ${BRIGHT}${ROOT_FREE}${RESET} (${ROOT_PCT}%)
+  [${ROOT_BAR}]
+
+
+${DIM}For service assistance, contact Arclink Support.${RESET}
+
+═══════════════════════════════════════════════════════════════
+"
+
+###############################################################################
+# OUTPUT - SSH VERSION (Unicode/NerdFont)
+###############################################################################
+else
+echo -e "
+═══════════════════════════════════════════════════════════════
+
+    \e[96m\e[1m▄▀█ █▀█ █▀▀\e[93m █░░ █ █▄░█ █▄▀${RESET}
+    \e[96m\e[1m█▀█ █▀▄ █▄▄\e[93m █▄▄ █ █░▀█ █░█${RESET}
+
+    ${CYAN}Arclink Tactical Operations Platform${RESET}
+    Node: ${BRIGHT}${HOST}${RESET}
+    Environment: ${CYAN}${ENV_DISPLAY}${RESET}
+
+═══════════════════════════════════════════════════════════════
+
+
+${BOLD}${CYAN}SYSTEM STATUS${RESET}
+───────────────────────
+• OS:   ${BRIGHT}$OS_VERSION${RESET}
+• K3s:  ${BRIGHT}$K3S_VERSION${RESET}
+• IP:   ${BRIGHT}$NODE_IP${RESET}
+• Pods Scheduled Here: ${BRIGHT}${POD_COUNT}${RESET}
+
+
+${BOLD}${CYAN}NODE HEALTH${RESET}
+───────────────────────
+• CPU Temp: ${BRIGHT}${CPU_TEMP}°C${RESET}
+• Load Avg: ${BRIGHT}${LOAD_AVG}${RESET}
+• Memory:   ${BRIGHT}${MEM_USED}/${MEM_TOTAL}MB (${MEM_PCT}%)${RESET}
+• Usage:    [${MEM_BAR}]
+• Ready:    ${BRIGHT}${NODE_READY}${RESET}
+
+
+${BOLD}${CYAN}CLUSTER NODES${RESET}
+───────────────────────
+• Masters:
+${MASTERS}
+
+• Workers:
+${WORKERS}
+
+
+${BOLD}${CYAN}SERVICES${RESET}
+───────────────────────
+• Rancher UI:   ${BRIGHT}${RANCHER_URL}${RESET}
+• Longhorn UI:  ${BRIGHT}${LONGHORN_URL}${RESET}
+
+
+${BOLD}${CYAN}STORAGE${RESET}
+───────────────────────
+• Longhorn Free: ${BRIGHT}${LH_FREE}${RESET} (${LH_PCT}%)
+  [${LH_BAR}]
+
+• Root Free:     ${BRIGHT}${ROOT_FREE}${RESET} (${ROOT_PCT}%)
+  [${ROOT_BAR}]
+
+
+${DIM}For service assistance, contact Arclink Support.${RESET}
+
+═══════════════════════════════════════════════════════════════
+"
+fi

@@ -1,0 +1,9 @@
+---
+# K3s agent role defaults
+
+# K3s installation
+k3s_install_script: https://get.k3s.io
+k3s_install_check: /usr/local/bin/k3s
+
+# Registry configuration directory
+k3s_config_dir: /etc/rancher/k3s

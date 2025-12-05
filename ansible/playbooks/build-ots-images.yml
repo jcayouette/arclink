@@ -1,0 +1,115 @@
+---
+# Build and push OpenTAKServer images to local registry
+# This playbook builds custom OTS images and pushes to registry
+
+- name: Build OpenTAKServer Docker Images
+  hosts: k3s_master[0]
+  gather_facts: yes
+  vars:
+    ots_version: "1.6.3"
+    registry_address: "{{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}:5000"
+    build_dir: /tmp/ots-build
+  
+  tasks:
+    - name: Install required packages for building
+      apt:
+        name:
+          - git
+          - python3
+          - python3-pip
+        state: present
+        update_cache: yes
+      become: yes
+    
+    - name: Create build directory
+      file:
+        path: "{{ build_dir }}"
+        state: directory
+        mode: '0755'
+    
+    - name: Clone OpenTAKServer repository
+      git:
+        repo: https://github.com/brian7704/OpenTAKServer.git
+        dest: "{{ build_dir }}/opentakserver"
+        version: "{{ ots_version }}"
+        force: yes
+    
+    - name: Check if Dockerfile exists
+      stat:
+        path: "{{ build_dir }}/opentakserver/Dockerfile"
+      register: dockerfile_check
+    
+    - name: Build OpenTAKServer image
+      command: >
+        docker build
+        -t {{ registry_address }}/opentakserver:{{ ots_version }}
+        -t {{ registry_address }}/opentakserver:latest
+        {{ build_dir }}/opentakserver
+      when: dockerfile_check.stat.exists
+      register: ots_build
+    
+    - name: Copy UI Dockerfile from arclink repo
+      copy:
+        src: "{{ playbook_dir }}/../../docker/ui/Dockerfile"
+        dest: "{{ build_dir }}/ui-Dockerfile"
+    
+    - name: Build UI image
+      command: >
+        docker build
+        -t {{ registry_address }}/opentakserver-ui:{{ ots_version }}
+        -t {{ registry_address }}/opentakserver-ui:latest
+        -f {{ build_dir }}/ui-Dockerfile
+        {{ build_dir }}
+      register: ui_build
+    
+    - name: Push OpenTAKServer image to registry
+      command: docker push {{ registry_address }}/opentakserver:{{ ots_version }}
+      when: ots_build is succeeded
+    
+    - name: Push OpenTAKServer latest tag
+      command: docker push {{ registry_address }}/opentakserver:latest
+      when: ots_build is succeeded
+    
+    - name: Push UI image to registry
+      command: docker push {{ registry_address }}/opentakserver-ui:{{ ots_version }}
+      when: ui_build is succeeded
+    
+    - name: Push UI latest tag
+      command: docker push {{ registry_address }}/opentakserver-ui:latest
+      when: ui_build is succeeded
+    
+    - name: Verify images in registry
+      uri:
+        url: "http://{{ registry_address }}/v2/_catalog"
+        return_content: yes
+      register: registry_catalog
+    
+    - name: Display images in registry
+      debug:
+        msg: "{{ registry_catalog.json }}"
+    
+    - name: Clean up build directory
+      file:
+        path: "{{ build_dir }}"
+        state: absent
+
+- name: Summary
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "IMAGE BUILD COMPLETE"
+          - "============================================"
+          - ""
+          - "Images built and pushed to registry"
+          - "Registry: {{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}:5000"
+          - ""
+          - "Images:"
+          - "  - opentakserver:{{ hostvars[groups['k3s_master'][0]]['ots_version'] }}"
+          - "  - opentakserver:latest"
+          - ""
+          - "Next step:"
+          - "  ansible-playbook playbooks/deploy-opentakserver.yml"

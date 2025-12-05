@@ -1,0 +1,16 @@
+---
+# Docker registry configuration
+registry_address: "node0.research.core:5000"
+registry_ip: "10.0.0.160:5000"
+
+# OpenTAKServer versions
+ots_version: "1.6.3"
+ui_version: "master"
+
+# Paths
+docker_build_dir: "/home/linux/arclink/docker"
+manifest_dir: "/home/linux/arclink/manifests"
+
+# Deployment configuration
+namespace: "tak"
+deployment_timeout: "300s"

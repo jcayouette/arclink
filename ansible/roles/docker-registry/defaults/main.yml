@@ -1,0 +1,18 @@
+---
+# Docker registry role defaults
+
+# Docker packages
+docker_packages:
+  - docker.io
+  - docker-compose
+
+# Registry configuration
+registry_container_name: registry
+registry_port: 5000
+registry_volume_path: /var/lib/registry
+registry_image: registry:2
+registry_restart_policy: unless-stopped
+
+# Registry configuration for K3s
+registry_config_dir: /etc/rancher/k3s
+registry_insecure: true

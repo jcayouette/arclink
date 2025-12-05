@@ -1,0 +1,71 @@
+#!/bin/bash
+# Monitor Docker build and deploy when complete
+
+set -e
+
+echo "Monitoring Docker image build..."
+echo "This will take approximately 30 minutes total."
+echo ""
+
+BUILD_LOG="/tmp/docker-build.log"
+
+# Wait for build to complete
+while true; do
+    if [ ! -f "$BUILD_LOG" ]; then
+        echo "Waiting for build log to appear..."
+        sleep 5
+        continue
+    fi
+    
+    # Check if build finished successfully
+    if grep -q "Build complete!" "$BUILD_LOG"; then
+        echo ""
+        echo "✓ Build completed successfully!"
+        break
+    fi
+    
+    # Check if build failed
+    if grep -q "ERROR:" "$BUILD_LOG" 2>/dev/null; then
+        echo ""
+        echo "✗ Build failed! Check the log:"
+        tail -20 "$BUILD_LOG"
+        exit 1
+    fi
+    
+    # Show progress
+    if grep -q "Building OpenTAKServer image" "$BUILD_LOG"; then
+        echo -n "."
+    fi
+    
+    sleep 10
+done
+
+echo ""
+echo "========================================="
+echo "Pushing images to local registry..."
+echo "========================================="
+
+# Push images to registry
+docker push localhost:5000/opentakserver:1.6.3
+docker push localhost:5000/opentakserver:latest
+docker push localhost:5000/opentakserver-ui:main
+docker push localhost:5000/opentakserver-ui:latest
+
+echo ""
+echo "✓ Images pushed to registry"
+echo ""
+echo "========================================="
+echo "Ready to deploy!"
+echo "========================================="
+echo ""
+echo "To deploy with custom images:"
+echo "  1. Remove old deployment:"
+echo "     kubectl delete -f manifests/ots-with-ui.yaml"
+echo ""
+echo "  2. Deploy with custom images:"
+echo "     kubectl apply -f manifests/ots-with-ui-custom-images.yaml"
+echo ""
+echo "  3. Set administrator password:"
+echo "     ./scripts/set-admin-password.sh password"
+echo ""
+echo "Pod will start in ~5-10 seconds instead of 10-15 minutes!"

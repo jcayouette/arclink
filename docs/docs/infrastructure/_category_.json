@@ -1,0 +1,8 @@
+{
+  "label": "Infrastructure",
+  "position": 7,
+  "link": {
+    "type": "generated-index",
+    "description": "Kubernetes infrastructure components: K3s, Rancher, and Longhorn storage."
+  }
+}

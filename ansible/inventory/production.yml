@@ -1,0 +1,91 @@
+---
+# Production Inventory for OpenTAKServer on K3s
+# 
+# Supported Configurations:
+# - Single node (development): 1 master, 0 agents
+# - HA cluster (recommended): 3 masters with embedded etcd
+# - Large cluster: 3 masters + 4+ agents
+#
+# Current configuration: 7-node cluster (1 master + 6 agents)
+
+all:
+  vars:
+    # Ansible connection settings
+    ansible_user: acmeastro
+    ansible_python_interpreter: /usr/bin/python3
+    
+    # Network configuration
+    domain: research.core
+    network_subnet: 10.0.0.0/24
+    
+    # K3s configuration
+    k3s_version: v1.33.6+k3s1
+    k3s_token_file: /var/lib/rancher/k3s/server/node-token
+    
+    # Docker registry
+    registry_host: node0.research.core
+    registry_port: 5000
+    registry_url: "{{ registry_host }}:{{ registry_port }}"
+    
+    # Common packages
+    common_packages:
+      - curl
+      - wget
+      - git
+      - vim
+      - htop
+      - net-tools
+      - ca-certificates
+      - apt-transport-https
+    
+  children:
+    k3s_cluster:
+      children:
+        # K3s Master Nodes (HA with embedded etcd)
+        # 3 masters provide high availability with etcd quorum
+        k3s_master:
+          hosts:
+            node0.research.core:
+              ansible_host: 10.0.0.160
+              k3s_master_primary: true  # First master initializes cluster
+            node1.research.core:
+              ansible_host: 10.0.0.161
+            node2.research.core:
+              ansible_host: 10.0.0.162
+        
+        # K3s Agent Nodes
+        # These nodes join the cluster and run workloads
+        k3s_agents:
+          hosts:
+            node3.research.core:
+              ansible_host: 10.0.0.163
+            node4.research.core:
+              ansible_host: 10.0.0.164
+            node5.research.core:
+              ansible_host: 10.0.0.165
+            node6.research.core:
+              ansible_host: 10.0.0.166
+
+# Example HA Configuration (3 masters with embedded etcd):
+# Uncomment and adjust the k3s_master section to enable HA:
+#
+# k3s_master:
+#   hosts:
+#     node0.research.core:
+#       ansible_host: 10.0.0.160
+#       k3s_master_primary: true  # First master to initialize cluster
+#     node1.research.core:
+#       ansible_host: 10.0.0.161
+#     node2.research.core:
+#       ansible_host: 10.0.0.162
+#
+# k3s_agents:
+#   hosts:
+#     node3.research.core:
+#       ansible_host: 10.0.0.163
+#     node4.research.core:
+#       ansible_host: 10.0.0.164
+#     node5.research.core:
+#       ansible_host: 10.0.0.165
+#     node6.research.core:
+#       ansible_host: 10.0.0.166

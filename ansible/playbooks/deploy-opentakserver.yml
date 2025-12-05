@@ -1,0 +1,373 @@
+---
+# Deploy OpenTAKServer application stack
+# Includes PostgreSQL, RabbitMQ, and OpenTAKServer
+
+- name: Deploy OpenTAKServer Stack
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    ots_namespace: tak
+    ots_version: "1.6.3"
+    registry_address: "{{ groups['k3s_master'][0] }}:5000"
+    postgres_password: "ChangeMeInProduction"
+    postgres_user: ots
+    rabbitmq_password: "ChangeMeInProduction"
+  
+  tasks:
+    - name: Create namespace
+      kubernetes.core.k8s:
+        name: "{{ ots_namespace }}"
+        api_version: v1
+        kind: Namespace
+        state: present
+    
+    - name: Deploy nginx ConfigMap
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ playbook_dir }}/../../manifests/nginx-config.yaml"
+    
+    - name: Deploy PostgreSQL with persistent storage
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata:
+            name: postgres
+            namespace: "{{ ots_namespace }}"
+          spec:
+            serviceName: postgres
+            replicas: 1
+            selector:
+              matchLabels:
+                app: postgres
+            template:
+              metadata:
+                labels:
+                  app: postgres
+              spec:
+                containers:
+                - name: postgres
+                  image: postgres:15
+                  env:
+                  - name: POSTGRES_DB
+                    value: ots
+                  - name: POSTGRES_USER
+                    value: "{{ postgres_user }}"
+                  - name: POSTGRES_PASSWORD
+                    value: "{{ postgres_password }}"
+                  - name: PGDATA
+                    value: /var/lib/postgresql/data/pgdata
+                  ports:
+                  - containerPort: 5432
+                    name: postgres
+                  volumeMounts:
+                  - name: postgres-storage
+                    mountPath: /var/lib/postgresql/data
+            volumeClaimTemplates:
+            - metadata:
+                name: postgres-storage
+              spec:
+                accessModes: [ "ReadWriteOnce" ]
+                storageClassName: longhorn
+                resources:
+                  requests:
+                    storage: 10Gi
+    
+    - name: Create PostgreSQL service
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: postgres
+            namespace: "{{ ots_namespace }}"
+          spec:
+            selector:
+              app: postgres
+            ports:
+            - port: 5432
+              targetPort: 5432
+    
+    - name: Deploy RabbitMQ
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: rabbitmq
+            namespace: "{{ ots_namespace }}"
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: rabbitmq
+            template:
+              metadata:
+                labels:
+                  app: rabbitmq
+              spec:
+                containers:
+                - name: rabbitmq
+                  image: rabbitmq:3-management
+                  env:
+                  - name: RABBITMQ_DEFAULT_USER
+                    value: guest
+                  - name: RABBITMQ_DEFAULT_PASS
+                    value: "{{ rabbitmq_password }}"
+                  ports:
+                  - containerPort: 5672
+                    name: amqp
+                  - containerPort: 15672
+                    name: management
+    
+    - name: Create RabbitMQ service
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: rabbitmq
+            namespace: "{{ ots_namespace }}"
+          spec:
+            selector:
+              app: rabbitmq
+            ports:
+            - port: 5672
+              targetPort: 5672
+              name: amqp
+            - port: 15672
+              targetPort: 15672
+              name: management
+    
+    - name: Deploy OpenTAKServer
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: opentakserver
+            namespace: "{{ ots_namespace }}"
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: opentakserver
+            template:
+              metadata:
+                labels:
+                  app: opentakserver
+              spec:
+                initContainers:
+                - name: setup-config
+                  image: busybox
+                  command: ["/bin/sh", "-c"]
+                  args:
+                    - |
+                      mkdir -p /home/ots/ots
+                      cat > /home/ots/ots/config.yml << 'EOFCONFIG'
+                      SQLALCHEMY_DATABASE_URI: postgresql+psycopg://ots:ChangeMeInProduction@postgres:5432/ots
+                      OTS_RABBITMQ_SERVER_ADDRESS: rabbitmq
+                      OTS_RABBITMQ_USERNAME: guest
+                      OTS_RABBITMQ_PASSWORD: {{ rabbitmq_password }}
+                      OTS_SOCKETIO_MESSAGE_QUEUE: ''
+                      OTS_DATA_FOLDER: /home/ots/ots
+                      OTS_CA_FOLDER: /home/ots/ots/ca
+                      UPLOAD_FOLDER: /home/ots/ots/uploads
+                      OTS_LISTENER_ADDRESS: 0.0.0.0
+                      OTS_NODE_ID: opentakserver-k3s
+                      SECRET_KEY: 273f514aefa1ebe4f6fc84f62e4a5abd1e6f7f146d4e1576218ca7db7153e6e3
+                      SECURITY_PASSWORD_SALT: DsM+0h3WaRatE00xYGSLCzYemVhclgahe/D9CTybzNE=
+                      WTF_CSRF_ENABLED: true
+                      WTF_CSRF_CHECK_DEFAULT: false
+                      WTF_CSRF_TIME_LIMIT: null
+                      SESSION_COOKIE_SAMESITE: Lax
+                      SESSION_COOKIE_HTTPONLY: true
+                      SESSION_COOKIE_SECURE: false
+                      SESSION_COOKIE_NAME: session
+                      SESSION_COOKIE_DOMAIN: null
+                      EOFCONFIG
+                  volumeMounts:
+                  - name: ots-data
+                    mountPath: /home/ots/ots
+                containers:
+                - name: opentakserver
+                  image: "{{ registry_address }}/opentakserver:{{ ots_version }}"
+                  env:
+                  - name: HOME
+                    value: "/home/ots"
+                  ports:
+                  - containerPort: 8081
+                    name: api
+                  - containerPort: 8088
+                    name: tcp-cot
+                  - containerPort: 8089
+                    name: ssl-cot
+                  volumeMounts:
+                  - name: ots-data
+                    mountPath: /home/ots/ots
+                  livenessProbe:
+                    httpGet:
+                      path: /api/health
+                      port: 8081
+                    initialDelaySeconds: 30
+                    periodSeconds: 10
+                  readinessProbe:
+                    httpGet:
+                      path: /api/health
+                      port: 8081
+                    initialDelaySeconds: 10
+                    periodSeconds: 5
+                - name: nginx
+                  image: "{{ registry_address }}/opentakserver-ui:{{ ots_version }}"
+                  ports:
+                  - containerPort: 8080
+                    name: web
+                  volumeMounts:
+                  - name: nginx-config
+                    mountPath: /etc/nginx/nginx.conf
+                    subPath: nginx.conf
+                volumes:
+                - name: ots-data
+                  emptyDir: {}
+                - name: nginx-config
+                  configMap:
+                    name: nginx-config
+    
+    - name: Create OpenTAKServer NodePort service
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: opentakserver
+            namespace: "{{ ots_namespace }}"
+          spec:
+            type: NodePort
+            selector:
+              app: opentakserver
+            ports:
+            - port: 8080
+              targetPort: 8080
+              nodePort: 31080
+              name: web
+            - port: 8081
+              targetPort: 8081
+              name: api
+            - port: 8088
+              targetPort: 8088
+              nodePort: 31088
+              name: tcp-cot
+            - port: 8089
+              targetPort: 8089
+              nodePort: 31089
+              name: ssl-cot
+    
+    - name: Wait for PostgreSQL to be ready
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ ots_namespace }}"
+        label_selectors:
+          - app=postgres
+      register: postgres_pods
+      until: postgres_pods.resources[0].status.phase == "Running"
+      retries: 30
+      delay: 10
+    
+    - name: Wait for OpenTAKServer to be ready
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ ots_namespace }}"
+        label_selectors:
+          - app=opentakserver
+      register: ots_pods
+      until: ots_pods.resources | length > 0 and ots_pods.resources[0].status.phase == "Running"
+      retries: 30
+      delay: 10
+      ignore_errors: yes
+    
+    - name: Check if OpenTAKServer is in ImagePullBackOff
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ ots_namespace }}"
+        label_selectors:
+          - app=opentakserver
+      register: ots_status
+    
+    - name: Fix ImagePullBackOff - restart K3s if needed
+      block:
+        - name: Restart K3s on all nodes
+          include_tasks: restart-k3s-inline.yml
+        
+        - name: Wait for cluster to stabilize
+          pause:
+            seconds: 30
+        
+        - name: Delete pods to force re-pull with updated registry config
+          kubernetes.core.k8s:
+            state: absent
+            kind: Pod
+            namespace: "{{ ots_namespace }}"
+            label_selectors:
+              - app=opentakserver
+        
+        - name: Wait for OpenTAKServer to recreate and start
+          kubernetes.core.k8s_info:
+            kind: Pod
+            namespace: "{{ ots_namespace }}"
+            label_selectors:
+              - app=opentakserver
+          register: ots_pods_fixed
+          until: ots_pods_fixed.resources | length > 0 and ots_pods_fixed.resources[0].status.phase == "Running"
+          retries: 30
+          delay: 10
+      when: ots_status.resources | length > 0 and ots_status.resources[0].status.containerStatuses[0].state.waiting.reason is defined and 'ImagePull' in ots_status.resources[0].status.containerStatuses[0].state.waiting.reason
+    
+    - name: Check and fix PostgreSQL if in CrashLoopBackOff
+      block:
+        - name: Delete PostgreSQL pod to recreate with PGDATA fix
+          kubernetes.core.k8s:
+            state: absent
+            kind: Pod
+            name: postgres-0
+            namespace: "{{ ots_namespace }}"
+        
+        - name: Wait for PostgreSQL to recreate
+          kubernetes.core.k8s_info:
+            kind: Pod
+            namespace: "{{ ots_namespace }}"
+            label_selectors:
+              - app=postgres
+          register: postgres_fixed
+          until: postgres_fixed.resources | length > 0 and postgres_fixed.resources[0].status.phase == "Running"
+          retries: 30
+          delay: 10
+      when: postgres_pods.resources | length > 0 and postgres_pods.resources[0].status.phase != "Running"
+    
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "OPENTAKSERVER DEPLOYMENT COMPLETE"
+          - "============================================"
+          - ""
+          - "OpenTAKServer is now running!"
+          - "Namespace: {{ ots_namespace }}"
+          - ""
+          - "Access points:"
+          - "  Web UI: http://{{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}:31080"
+          - "  TCP CoT: {{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}:31088"
+          - "  SSL CoT: {{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}:31089"
+          - ""
+          - "Storage:"
+          - "  PostgreSQL: 10Gi persistent volume (Longhorn)"
+          - ""
+          - "Verify deployment:"
+          - "  kubectl get pods -n {{ ots_namespace }}"
+          - "  kubectl get svc -n {{ ots_namespace }}"
+          - "  kubectl get pvc -n {{ ots_namespace }}"

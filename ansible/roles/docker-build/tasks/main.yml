@@ -1,0 +1,100 @@
+---
+- name: Check if Docker is installed
+  command: docker --version
+  register: docker_check
+  failed_when: false
+  changed_when: false
+
+- name: Fail if Docker is not installed
+  fail:
+    msg: "Docker is not installed. Please install Docker first."
+  when: docker_check.rc != 0
+
+- name: Ensure Docker daemon directory exists
+  file:
+    path: /etc/docker
+    state: directory
+    mode: '0755'
+  become: yes
+
+- name: Configure Docker for insecure registry
+  copy:
+    content: |
+      {
+        "insecure-registries": ["{{ registry_address }}", "{{ registry_ip }}"]
+      }
+    dest: /etc/docker/daemon.json
+    mode: '0644'
+  become: yes
+  register: docker_config
+
+- name: Restart Docker to apply registry configuration
+  systemd:
+    name: docker
+    state: restarted
+  become: yes
+  when: docker_config.changed
+
+- name: Wait for Docker to be ready
+  command: docker info
+  register: docker_ready
+  until: docker_ready.rc == 0
+  retries: 5
+  delay: 2
+  changed_when: false
+  when: docker_config.changed
+
+- name: Build OpenTAKServer image
+  command:
+    cmd: >
+      docker build
+      --platform linux/arm64
+      --build-arg OTS_VERSION={{ ots_version }}
+      -t {{ registry_address }}/opentakserver:{{ ots_version }}
+      -t {{ registry_address }}/opentakserver:latest
+      -f opentakserver/Dockerfile
+      opentakserver/
+    chdir: "{{ docker_build_dir }}"
+  register: ots_build
+  changed_when: true
+
+- name: Build OpenTAKServer UI image
+  command:
+    cmd: >
+      docker build
+      --platform linux/arm64
+      --build-arg UI_VERSION={{ ui_version }}
+      -t {{ registry_address }}/opentakserver-ui:{{ ui_version }}
+      -t {{ registry_address }}/opentakserver-ui:latest
+      -f ui/Dockerfile
+      ui/
+    chdir: "{{ docker_build_dir }}"
+  register: ui_build
+  changed_when: true
+
+- name: Push OpenTAKServer versioned image to registry
+  command: docker push {{ registry_address }}/opentakserver:{{ ots_version }}
+  register: ots_push_version
+
+- name: Push OpenTAKServer latest tag to registry
+  command: docker push {{ registry_address }}/opentakserver:latest
+  register: ots_push_latest
+
+- name: Push UI versioned image to registry
+  command: docker push {{ registry_address }}/opentakserver-ui:{{ ui_version }}
+  register: ui_push_version
+
+- name: Push UI latest tag to registry
+  command: docker push {{ registry_address }}/opentakserver-ui:latest
+  register: ui_push_latest
+
+- name: Verify images in registry
+  uri:
+    url: "http://{{ registry_address }}/v2/_catalog"
+    method: GET
+    return_content: yes
+  register: registry_catalog
+
+- name: Display registry contents
+  debug:
+    msg: "Registry contains: {{ registry_catalog.json.repositories }}"

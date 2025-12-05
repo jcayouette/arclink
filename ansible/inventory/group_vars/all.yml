@@ -1,0 +1,72 @@
+---
+# Global variables for all hosts in the cluster
+
+# System Configuration
+timezone: UTC
+locale: en_US.UTF-8
+
+# SSH Configuration
+ssh_key_type: ed25519
+ssh_key_comment: "ansible-managed-key"
+
+# Sudo Configuration
+sudo_passwordless: true
+sudoers_file: /etc/sudoers.d/{{ ansible_user }}
+
+# System Packages
+system_packages_update: true
+system_packages_upgrade: false  # Set true for full system upgrade
+
+# Docker Configuration (for registry on master)
+docker_packages:
+  - docker.io
+  - docker-compose
+
+# K3s Common Settings
+k3s_version: v1.33.5+k3s1
+k3s_install_url: https://get.k3s.io
+k3s_config_dir: /etc/rancher/k3s
+k3s_data_dir: /var/lib/rancher/k3s
+k3s_bin_dir: /usr/local/bin
+
+# Registry Configuration
+registry_insecure: true
+registry_config_file: "{{ k3s_config_dir }}/registries.yaml"
+registry_docker_config: /etc/docker/daemon.json
+
+# Network Settings
+cluster_cidr: 10.42.0.0/16
+service_cidr: 10.43.0.0/16
+cluster_dns: 10.43.0.10
+
+# Storage Configuration
+longhorn_enabled: true
+longhorn_namespace: longhorn-system
+
+# OpenTAKServer Configuration
+ots_namespace: tak
+ots_version: latest
+ots_image: "{{ registry_url }}/opentakserver"
+ots_ui_image: "{{ registry_url }}/opentakserver-ui"
+
+# PostgreSQL Configuration
+postgres_enabled: true
+postgres_namespace: tak
+postgres_image: postgres:15-alpine
+postgres_storage_size: 20Gi
+
+# RabbitMQ Configuration
+rabbitmq_enabled: true
+rabbitmq_namespace: tak
+rabbitmq_image: rabbitmq:3-management
+rabbitmq_storage_size: 5Gi
+
+# Monitoring (Optional)
+monitoring_enabled: false
+prometheus_namespace: monitoring
+grafana_namespace: monitoring
+
+# Backup Configuration (Future)
+backup_enabled: false
+backup_schedule: "0 2 * * *"  # 2 AM daily
+backup_retention_days: 7

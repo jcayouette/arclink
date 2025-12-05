@@ -1,0 +1,17 @@
+---
+# Inline task file for restarting K3s - used by other playbooks
+- name: Restart K3s on master nodes
+  systemd:
+    name: k3s
+    state: restarted
+  delegate_to: "{{ item }}"
+  become: yes
+  loop: "{{ groups['k3s_master'] }}"
+
+- name: Restart K3s on agent nodes
+  systemd:
+    name: k3s-agent
+    state: restarted
+  delegate_to: "{{ item }}"
+  become: yes
+  loop: "{{ groups['k3s_agents'] }}"

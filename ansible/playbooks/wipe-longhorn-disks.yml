@@ -1,0 +1,146 @@
+---
+# Wipe Longhorn disks on all nodes
+# This playbook safely removes all Longhorn data and prepares for redeployment
+
+- name: Wipe Longhorn Storage on All Nodes
+  hosts: k3s_cluster
+  become: yes
+  gather_facts: yes
+  vars:
+    longhorn_namespace: longhorn-system
+    longhorn_mount_path: /mnt/longhorn
+  
+  tasks:
+    - name: Display nodes being wiped
+      debug:
+        msg: "Wiping Longhorn storage on {{ inventory_hostname }} at {{ longhorn_mount_path }}"
+    
+    - name: Stop any running processes accessing /mnt/longhorn
+      shell: |
+        # Find and kill any processes using the mount point
+        fuser -km {{ longhorn_mount_path }} 2>/dev/null || true
+      ignore_errors: yes
+      changed_when: false
+    
+    - name: Wait for processes to stop
+      pause:
+        seconds: 5
+    
+    - name: Check if /mnt/longhorn exists
+      stat:
+        path: "{{ longhorn_mount_path }}"
+      register: longhorn_path
+    
+    - name: Unmount any filesystems under /mnt/longhorn
+      shell: |
+        # Find and unmount any mount points under /mnt/longhorn
+        mount | grep "{{ longhorn_mount_path }}" | awk '{print $3}' | sort -r | while read mnt; do
+          echo "Unmounting $mnt"
+          umount -l "$mnt" 2>/dev/null || true
+        done
+      when: longhorn_path.stat.exists
+      ignore_errors: yes
+      changed_when: false
+    
+    - name: Remove all Longhorn data
+      file:
+        path: "{{ longhorn_mount_path }}"
+        state: absent
+      when: longhorn_path.stat.exists
+    
+    - name: Recreate clean /mnt/longhorn directory
+      file:
+        path: "{{ longhorn_mount_path }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+    
+    - name: Verify directory is clean
+      find:
+        paths: "{{ longhorn_mount_path }}"
+        file_type: any
+      register: remaining_files
+    
+    - name: Confirm cleanup
+      debug:
+        msg: "{{ longhorn_mount_path }} on {{ inventory_hostname }} is clean and ready ({{ remaining_files.matched }} files)"
+
+- name: Delete Longhorn from Kubernetes
+  hosts: k3s_master[0]
+  gather_facts: no
+  vars:
+    longhorn_namespace: longhorn-system
+  environment:
+    KUBECONFIG: "{{ playbook_dir }}/../kubeconfig"
+  
+  tasks:
+    - name: Check if Longhorn namespace exists
+      command: kubectl get namespace {{ longhorn_namespace }}
+      register: ns_check
+      failed_when: false
+      changed_when: false
+    
+    - name: Delete Longhorn namespace if it exists
+      command: kubectl delete namespace {{ longhorn_namespace }} --wait=false
+      when: ns_check.rc == 0
+      register: ns_delete
+      changed_when: ns_delete.rc == 0
+    
+    - name: Monitor namespace termination with real-time pod status
+      shell: |
+        echo "Watching Longhorn namespace termination..."
+        echo "=========================================="
+        for i in {1..60}; do
+          if ! kubectl get namespace {{ longhorn_namespace }} 2>/dev/null; then
+            echo ""
+            echo "✓ Namespace terminated successfully"
+            exit 0
+          fi
+          
+          # Show remaining pods
+          pod_count=$(kubectl get pods -n {{ longhorn_namespace }} --no-headers 2>/dev/null | wc -l)
+          if [ $pod_count -gt 0 ]; then
+            echo "[$i/60] $pod_count pods still terminating:"
+            kubectl get pods -n {{ longhorn_namespace }} --no-headers 2>/dev/null | awk '{print "  - " $1 " (" $3 ")"}' | head -5
+          else
+            echo "[$i/60] Pods terminated, waiting for namespace cleanup..."
+          fi
+          
+          sleep 5
+        done
+        echo ""
+        echo "⚠ Warning: Namespace still exists after timeout"
+        exit 1
+      when: ns_check.rc == 0
+      register: ns_wait
+      failed_when: false
+    
+    - name: Remove Longhorn CRDs
+      shell: |
+        kubectl get crd | grep longhorn.io | awk '{print $1}' | xargs -r kubectl delete crd
+      register: crd_delete
+      failed_when: false
+      changed_when: crd_delete.stdout != ""
+    
+    - name: Verify cleanup is complete
+      command: kubectl get namespace {{ longhorn_namespace }}
+      register: final_check
+      failed_when: final_check.rc == 0
+      changed_when: false
+    
+    - name: Display completion message
+      debug:
+        msg:
+          - "============================================"
+          - "LONGHORN DISK WIPE COMPLETE"
+          - "============================================"
+          - ""
+          - "All Longhorn data has been removed from:"
+          - "  - /mnt/longhorn on all nodes (node0-6)"
+          - "  - Kubernetes namespace and CRDs"
+          - ""
+          - "Next steps:"
+          - "  1. Run: ansible-playbook -i inventory/production.yml playbooks/deploy-longhorn.yml"
+          - "  2. This will deploy Longhorn with /mnt/longhorn configured"
+          - ""
